@@ -1,0 +1,108 @@
+{
+  "schema_version": 2,
+  "policy_id": "enterprise-default",
+  "policy_version": "4.0.0",
+  "denied_topics": {
+    "biological_harm_instructions": [
+      "\\b(?:build|create|engineer|synthesize)\\b.{0,60}\\b(?:bioweapon|pathogen)\\b"
+    ],
+    "critical_infrastructure_sabotage": [
+      "\\b(?:disable|sabotage|destroy)\\b.{0,60}\\b(?:power grid|water plant|hospital network|scada)\\b"
+    ],
+    "violent_wrongdoing": [
+      "\\b(?:instructions|steps|best way|how to)\\b.{0,60}\\b(?:murder|bomb|mass casualty)\\b"
+    ],
+    "fraud_enablement": [
+      "\\b(?:create|forge|generate)\\b.{0,60}\\b(?:counterfeit|fake identity|stolen card)\\b"
+    ]
+  },
+  "blocked_terms": [
+    "how to make a bomb",
+    "steal credentials"
+  ],
+  "masked_terms": [
+    "restricted project codeword",
+    "internal account reference"
+  ],
+  "prompt_attack_patterns": [
+    "ignore\\s+(?:all\\s+)?(?:prior|previous)\\s+instructions",
+    "reveal\\s+(?:the\\s+)?(?:hidden\\s+)?system\\s+prompt",
+    "print\\s+(?:all\\s+)?(?:environment\\s+variables|secrets)",
+    "bypass\\s+(?:the\\s+)?(?:guardrail|policy|safety)",
+    "pretend\\s+to\\s+be\\s+(?:an?\\s+)?(?:administrator|root|system)"
+  ],
+  "presidio_entities": [
+    "CREDIT_CARD",
+    "EMAIL_ADDRESS",
+    "IBAN_CODE",
+    "IP_ADDRESS",
+    "PHONE_NUMBER",
+    "US_DRIVER_LICENSE",
+    "US_ITIN",
+    "US_PASSPORT",
+    "US_SSN",
+    "US_SOCIAL_SECURITY_NUMBER"
+  ],
+  "entity_actions": {
+    "AWS_ACCESS_KEY": "block",
+    "AWS_SECRET_ACCESS_KEY": "block",
+    "CREDIT_CARD": "queue_for_review",
+    "CUI_MARKING": "queue_for_review",
+    "EMAIL_ADDRESS": "sanitize",
+    "GITHUB_TOKEN": "block",
+    "IBAN_CODE": "sanitize",
+    "IP_ADDRESS": "sanitize",
+    "JWT": "queue_for_review",
+    "OPENAI_API_KEY": "block",
+    "PHONE_NUMBER": "sanitize",
+    "PRIVATE_KEY": "block",
+    "SLACK_TOKEN": "block",
+    "US_DRIVER_LICENSE": "sanitize",
+    "US_ITIN": "block",
+    "US_PASSPORT": "block",
+    "US_SSN": "block",
+    "US_SOCIAL_SECURITY_NUMBER": "block"
+  },
+  "capability_roles": {
+    "external_api": [
+      "admin",
+      "security_engineer"
+    ],
+    "retrieval": [
+      "admin",
+      "analyst",
+      "mlops",
+      "security_engineer",
+      "user"
+    ],
+    "write": [
+      "admin",
+      "mlops",
+      "security_engineer"
+    ]
+  },
+  "risk_weights": {
+    "authorization": 0.45,
+    "aws_bedrock_guardrail": 0.5,
+    "behavior": 0.2,
+    "default": 0.1,
+    "denied_topic": 0.5,
+    "exfiltration": 0.45,
+    "local_grounding_heuristic": 0.3,
+    "privacy": 0.35,
+    "prompt_attack": 0.4,
+    "system": 0.5,
+    "term_filter": 0.35
+  },
+  "grounding": {
+    "citation_required": true,
+    "citation_min_words": 25,
+    "minimum_token_length": 4
+  },
+  "limits": {
+    "max_context_chars": 65536,
+    "max_context_items": 20,
+    "max_input_chars": 32768,
+    "max_output_chars": 32768
+  }
+}

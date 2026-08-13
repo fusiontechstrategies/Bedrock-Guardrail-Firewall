@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.venv/
+venv/
+env/
+
+# Test and analysis output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.ci-data*/
+.final-check/
+.integration-check/
+.validation-state/
+bandit-report.json
+gitleaks-report.*
+
+# Runtime state and private evidence
+.guardrail-data/
+audit_logs/
+incident_logs/
+guardrail_behavior_state.json
+guardrail_metrics.json
+*.lock
+
+# Local-only source material
+.local-reference/
+
+# Credentials and environment overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+~*

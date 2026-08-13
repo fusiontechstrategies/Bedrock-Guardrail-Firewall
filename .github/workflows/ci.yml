@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test ${{ matrix.os }} Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile runtime
+        run: python -m py_compile orchestrator.py
+
+      - name: Run automated tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Run built-in self-test
+        run: python orchestrator.py --data-dir .ci-data --presidio-mode disabled self-test
+
+      - name: Run built-in adversarial suite
+        run: python orchestrator.py --data-dir .ci-data --presidio-mode disabled red-team
+
+  quality:
+    name: Quality and security
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install development tools
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Check formatting
+        run: ruff format --check orchestrator.py tests
+
+      - name: Lint
+        run: ruff check orchestrator.py tests
+
+      - name: Run coverage gate
+        run: coverage run -m unittest discover -s tests && coverage report
+
+      - name: Run static-security scan
+        run: bandit -c pyproject.toml -r orchestrator.py -q
+
+      - name: Audit AWS dependencies
+        run: pip-audit -r requirements-aws.txt --progress-spinner off
+
+      - name: Audit Presidio dependencies
+        run: pip-audit -r requirements-presidio.txt --progress-spinner off
+
+      - name: Audit development dependencies
+        run: pip-audit -r requirements-dev.txt --progress-spinner off
+
+  aws-sdk-contract:
+    name: AWS SDK contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-aws.txt
+
+      - name: Install pinned AWS SDK
+        run: python -m pip install --disable-pip-version-check -r requirements-aws.txt
+
+      - name: Verify ApplyGuardrail SDK model
+        run: python -m unittest tests.test_optional_integrations.Boto3ContractTests -v
+
+  presidio-integration:
+    name: Presidio integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-presidio.txt
+
+      - name: Install pinned Presidio stack
+        run: python -m pip install --disable-pip-version-check -r requirements-presidio.txt
+
+      - name: Verify Presidio engine and redaction
+        run: python -m unittest tests.test_optional_integrations.PresidioIntegrationTests -v
+
+  required-checks:
+    name: Required checks
+    if: always()
+    needs: [test, quality, aws-sdk-contract, presidio-integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Confirm required jobs passed
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          AWS_CONTRACT_RESULT: ${{ needs.aws-sdk-contract.result }}
+          PRESIDIO_RESULT: ${{ needs.presidio-integration.result }}
+        run: |
+          test "$TEST_RESULT" = "success"
+          test "$QUALITY_RESULT" = "success"
+          test "$AWS_CONTRACT_RESULT" = "success"
+          test "$PRESIDIO_RESULT" = "success"

@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose a safe enhancement or policy capability
+title: "[Feature]: "
+labels: [enhancement, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem and desired outcome. Keep the production runtime in one Python file and use synthetic examples only.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What security, privacy, reliability, or usability problem should be solved?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and privacy impact
+      description: Explain new trust boundaries, data movement, permissions, and failure behavior.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: principles
+    attributes:
+      label: Design principles
+      options:
+        - label: The proposal does not require implicit AWS calls.
+          required: true
+        - label: The proposal does not place raw content in operational evidence.
+          required: true
+        - label: Examples contain no credentials, personal data, or private resource names.
+          required: true

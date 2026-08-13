@@ -1,0 +1,4 @@
+bandit==1.9.4
+coverage==7.10.6
+pip-audit==2.10.1
+ruff==0.16.2

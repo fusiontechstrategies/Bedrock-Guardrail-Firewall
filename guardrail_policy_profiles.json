@@ -1,0 +1,47 @@
+{
+  "schema_version": 2,
+  "profiles": {
+    "balanced": {
+      "aws_guardrail_required": false,
+      "external_failure_action": "queue_for_review",
+      "grounding_block_threshold": 0.05,
+      "grounding_review_threshold": 0.35,
+      "presidio_failure_action": "queue_for_review",
+      "presidio_required": false,
+      "prompt_attack_threshold": 0.5,
+      "risk_thresholds": {
+        "low": 0.25,
+        "medium": 0.5,
+        "high": 0.75
+      }
+    },
+    "production": {
+      "aws_guardrail_required": true,
+      "external_failure_action": "block",
+      "grounding_block_threshold": 0.1,
+      "grounding_review_threshold": 0.45,
+      "presidio_failure_action": "block",
+      "presidio_required": true,
+      "prompt_attack_threshold": 0.3,
+      "risk_thresholds": {
+        "low": 0.2,
+        "medium": 0.4,
+        "high": 0.65
+      }
+    },
+    "offline_test": {
+      "aws_guardrail_required": false,
+      "external_failure_action": "queue_for_review",
+      "grounding_block_threshold": 0.05,
+      "grounding_review_threshold": 0.35,
+      "presidio_failure_action": "queue_for_review",
+      "presidio_required": false,
+      "prompt_attack_threshold": 0.5,
+      "risk_thresholds": {
+        "low": 0.25,
+        "medium": 0.5,
+        "high": 0.75
+      }
+    }
+  }
+}

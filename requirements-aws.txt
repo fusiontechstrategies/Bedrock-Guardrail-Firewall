@@ -1,0 +1,2 @@
+# Optional live AWS integration. Exact pins make deployments reproducible.
+boto3==1.43.70

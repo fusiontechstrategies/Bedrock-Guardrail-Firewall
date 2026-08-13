@@ -1,0 +1,87 @@
+name: Bug report
+description: Report a reproducible, non-sensitive defect
+title: "[Bug]: "
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve Bedrock Guardrail Firewall. Do not include credentials, personal data, private resource names, real prompts, or production records. Report security issues privately as described in SECURITY.md.
+
+  - type: input
+    id: version
+    attributes:
+      label: Product version
+      placeholder: 4.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: 3.12.10
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: aws-mode
+    attributes:
+      label: AWS mode
+      options:
+        - disabled
+        - preview
+        - live
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Explain what happened using sanitized, synthetic examples.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest safe example that reproduces the issue.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: checks
+    attributes:
+      label: Local checks
+      description: Paste sanitized output from doctor, policy validation, or self-test.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data-safety confirmation
+      options:
+        - label: I removed credentials, personal data, private resource names, and production content.
+          required: true
+        - label: This report is not a security vulnerability.
+          required: true

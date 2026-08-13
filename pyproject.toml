@@ -1,0 +1,23 @@
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "SIM", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["E402", "I001"]
+
+[tool.coverage.run]
+branch = true
+source = ["orchestrator"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = false
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B105"]
+targets = ["orchestrator.py"]
