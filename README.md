@@ -155,6 +155,12 @@ This project is a defense-in-depth control, not a replacement for IAM, network i
 
 Live AWS mode can transmit sanitized content to the configured Amazon Bedrock Guardrail. Review applicable data-handling requirements before enabling it.
 
+## Federal cybersecurity discussion
+
+For practitioner discussion about federal cloud, control effectiveness, evidence, incident response, and mission resilience, visit [r/FederalCyber](https://www.reddit.com/r/FederalCyber/).
+
+It is an independent, unofficial community for public-source discussion. Never post CUI, credentials, customer details, active incident data, or nonpublic vulnerabilities.
+
 ## License
 
 Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
