@@ -10,6 +10,7 @@ One file. Multiple control planes. Zero implicit cloud calls.
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue)
 [![CI](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/actions/workflows/ci.yml/badge.svg)](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/actions/workflows/codeql.yml/badge.svg)](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/actions/workflows/codeql.yml)
+[![Security Scanners](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/actions/workflows/security.yml/badge.svg)](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/actions/workflows/security.yml)
 
 Bedrock Guardrail Firewall is a privacy-first enforcement layer for generative AI systems. It combines deterministic local controls, optional Microsoft Presidio analysis, and the Amazon Bedrock `ApplyGuardrail` API without invoking a foundation model.
 

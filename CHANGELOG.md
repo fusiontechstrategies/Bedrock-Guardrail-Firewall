@@ -14,6 +14,7 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 - Exact botocore service-model pin and SHA-256 verification for the Presidio English model wheel
 - Offline six-case sanitized demo with measurable decision and containment results
 - Continuous-integration package build, metadata, clean-install, import, resource, and CLI checks
+- Scheduled Semgrep and Trivy scans with native GitHub code-scanning uploads and retained SARIF evidence
 
 ### Changed
 
@@ -21,12 +22,14 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 - Installed packages retain their bundled default policy documents while runtime state remains outside the package directory
 - Distribution metadata uses `4.1.0.dev0` to identify development toward the next minor version without presenting it as a release
 - Quick start now covers a clean Windows, Linux, or macOS source installation
+- GitHub workflows avoid retaining checkout credentials and Dependabot updates use explicit cooldowns
 
 ### Security
 
 - Serialized shared Presidio initialization so concurrent requests wait for a complete analyzer or receive the same fail-closed initialization error
 - Added defensive degraded-state handling when a required Presidio analyzer is unexpectedly unavailable
 - Expanded sanitized-demo evaluation containment across Python socket creation, connection, and name-resolution entry points
+- Redacted AWS request previews use a non-HTML marker while continuing to expose only length and digest metadata
 
 ## [4.0.0] - 2026-08-12
 

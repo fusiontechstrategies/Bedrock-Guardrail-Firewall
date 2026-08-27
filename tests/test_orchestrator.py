@@ -1053,7 +1053,7 @@ class AwsIntegrationTests(GuardrailTestCase):
         encoded = json.dumps(preview)
         self.assertNotIn("sensitive input", encoded)
         self.assertNotIn("candidate", encoded)
-        self.assertIn("<omitted:", encoded)
+        self.assertIn("[omitted:", encoded)
 
     def test_bedrock_failure_uses_fail_safe_profile_action(self):
         client = FakeBedrockClient(failure=TimeoutError("synthetic timeout"))
