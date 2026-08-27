@@ -1,3 +1,73 @@
+[build-system]
+requires = ["setuptools==84.0.0", "wheel==0.48.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bedrock-guardrail-firewall"
+version = "4.1.0.dev0"
+description = "Privacy-first policy enforcement for generative AI traffic"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Jeffrey Friedler" }]
+keywords = [
+  "amazon-bedrock",
+  "bedrock-guardrails",
+  "data-loss-prevention",
+  "generative-ai",
+  "llm-security",
+  "microsoft-presidio",
+  "pii-redaction",
+  "prompt-injection",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: System Administrators",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Security",
+  "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+aws = ["boto3==1.43.77", "botocore==1.43.77"]
+presidio = [
+  "presidio-analyzer==2.2.364; python_version < '3.14'",
+  "spacy==3.8.15; python_version < '3.14'",
+]
+
+[project.scripts]
+bedrock-guardrail-firewall = "bedrock_guardrail_firewall.orchestrator:main"
+
+[project.urls]
+Homepage = "https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall"
+Documentation = "https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall#readme"
+Changelog = "https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/blob/main/CHANGELOG.md"
+Issues = "https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/issues"
+Security = "https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/security/policy"
+
+[tool.setuptools]
+packages = ["bedrock_guardrail_firewall"]
+package-dir = { bedrock_guardrail_firewall = "." }
+include-package-data = false
+
+[tool.setuptools.package-data]
+bedrock_guardrail_firewall = [
+  "guardrail_policy.json",
+  "guardrail_policy_profiles.json",
+  "py.typed",
+]
+
 [tool.ruff]
 line-length = 88
 target-version = "py310"

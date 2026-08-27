@@ -1,5 +1,17 @@
 # Quick Reference
 
+## Install from source
+
+The core has no third-party runtime dependencies. From a repository checkout:
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install .
+.\.venv\Scripts\bedrock-guardrail-firewall.exe --version
+```
+
+The examples below use `python orchestrator.py` so a portable source checkout remains usable without installation. After installation, `bedrock-guardrail-firewall` accepts the same arguments.
+
 ## Safe local checks
 
 ```powershell
@@ -96,6 +108,16 @@ python orchestrator.py metrics-report
 ```
 
 Runtime state defaults to `.guardrail-data`. Override it with `--data-dir` or `GUARDRAIL_DATA_DIR`.
+
+Direct `orchestrator.py` execution resolves relative policy, profile, and state paths from the source file directory. Installed execution resolves explicitly supplied relative paths from the current working directory, uses bundled default policies, and stores default state under the working directory.
+
+## Sanitized demo fixture
+
+```powershell
+.\.venv\Scripts\python.exe examples\run_sanitized_demo.py
+```
+
+The six-case demo is deterministic, runs with AWS and Presidio disabled, actively denies socket use, omits fixture content from its report, and exits nonzero if its expected decisions or high-risk containment regress.
 
 ## Policy integrity
 

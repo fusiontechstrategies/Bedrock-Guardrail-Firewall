@@ -22,6 +22,7 @@ import re
 import secrets
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import uuid
@@ -34,10 +35,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-__version__ = "4.0.0"
+# Development version. Release preparation must set the approved release version.
+__version__ = "4.1.0.dev0"
 PRODUCT_NAME = "Bedrock Guardrail Firewall"
 POLICY_SCHEMA_VERSION = 2
 BASE_DIR = Path(__file__).resolve().parent
+RUNNING_AS_PACKAGE = __package__ == "bedrock_guardrail_firewall"
 
 EXIT_OK = 0
 EXIT_ERROR = 2
@@ -65,6 +68,7 @@ except Exception as exc:  # Optional integration must not break offline operatio
     BOTO3_IMPORT_ERROR = type(exc).__name__
 
 try:
+    import spacy
     from presidio_analyzer import AnalyzerEngine
     from presidio_analyzer.context_aware_enhancers import LemmaContextAwareEnhancer
     from presidio_analyzer.nlp_engine import NlpEngineProvider
@@ -72,11 +76,15 @@ try:
     PRESIDIO_AVAILABLE = True
     PRESIDIO_IMPORT_ERROR: str | None = None
 except Exception as exc:  # Optional integration must not break offline operation.
+    spacy = None
     AnalyzerEngine = None
     LemmaContextAwareEnhancer = None
     NlpEngineProvider = None
     PRESIDIO_AVAILABLE = False
     PRESIDIO_IMPORT_ERROR = type(exc).__name__
+
+
+_PRESIDIO_INITIALIZATION_LOCK = threading.Lock()
 
 
 class GuardrailError(Exception):
@@ -298,10 +306,16 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return value
 
 
+def _relative_runtime_base() -> Path:
+    # Preserve portable one-file behavior while keeping installed state out of
+    # site-packages. Package identity is explicit and cannot be request-selected.
+    return Path.cwd() if RUNNING_AS_PACKAGE else BASE_DIR
+
+
 def _resolve_path(raw: str | os.PathLike[str] | None, default: Path) -> Path:
     path = Path(raw) if raw else default
     if not path.is_absolute():
-        path = BASE_DIR / path
+        path = _relative_runtime_base() / path
     return path.resolve(strict=False)
 
 
@@ -546,7 +560,7 @@ class RuntimeConfig:
             ),
             data_dir=_resolve_path(
                 data_dir or os.environ.get("GUARDRAIL_DATA_DIR"),
-                BASE_DIR / ".guardrail-data",
+                _relative_runtime_base() / ".guardrail-data",
             ),
             profile_name=(
                 profile_name or os.environ.get("GUARDRAIL_POLICY_PROFILE", "balanced")
@@ -623,6 +637,13 @@ class RuntimeConfig:
         if self.presidio_mode not in {"disabled", "auto", "required"}:
             raise ConfigurationError(
                 "GUARDRAIL_PRESIDIO_MODE must be disabled, auto, or required"
+            )
+        if not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*",
+            self.presidio_model,
+        ):
+            raise ConfigurationError(
+                "GUARDRAIL_PRESIDIO_MODEL must name an installed Python package"
             )
         if self.aws_mode not in {"disabled", "preview", "live"}:
             raise ConfigurationError(
@@ -1307,6 +1328,20 @@ REGEX_RECOGNIZERS = (
 )
 
 
+def _presidio_model_is_installed(model_name: str) -> bool:
+    if spacy is None:
+        return False
+    try:
+        return bool(spacy.util.is_package(model_name))
+    except Exception:
+        return False
+
+
+def _deny_presidio_model_download(*args: Any, **kwargs: Any) -> None:
+    del args, kwargs
+    raise RuntimeError("Runtime model downloads are disabled")
+
+
 class PrivacyEngine:
     def __init__(
         self, config: RuntimeConfig, bundle: PolicyBundle, profile: PolicyProfile
@@ -1317,41 +1352,67 @@ class PrivacyEngine:
         self.analyzer: Any = None
         self.analyzer_attempted = False
         self.analyzer_error: str | None = None
+        self._analyzer_initialization_complete = threading.Event()
 
     def _initialize_presidio(self) -> None:
-        if self.analyzer_attempted or self.config.presidio_mode == "disabled":
+        if (
+            self.config.presidio_mode == "disabled"
+            or self._analyzer_initialization_complete.is_set()
+        ):
             return
-        self.analyzer_attempted = True
-        if not PRESIDIO_AVAILABLE:
-            self.analyzer_error = PRESIDIO_IMPORT_ERROR or "dependency_unavailable"
-            return
-        try:
-            provider = NlpEngineProvider(
-                nlp_configuration={
-                    "nlp_engine_name": "spacy",
-                    "models": [
-                        {
-                            "lang_code": "en",
-                            "model_name": self.config.presidio_model,
+        with _PRESIDIO_INITIALIZATION_LOCK:
+            if self._analyzer_initialization_complete.is_set():
+                return
+            if self.analyzer_attempted:
+                if self.analyzer is None and self.analyzer_error is None:
+                    self.analyzer_error = "presidio_analyzer_unavailable"
+                self._analyzer_initialization_complete.set()
+                return
+            self.analyzer_attempted = True
+            try:
+                if not PRESIDIO_AVAILABLE:
+                    self.analyzer_error = (
+                        PRESIDIO_IMPORT_ERROR or "dependency_unavailable"
+                    )
+                    return
+                if not _presidio_model_is_installed(self.config.presidio_model):
+                    self.analyzer_error = "presidio_model_unavailable"
+                    return
+                original_download = spacy.cli.download
+                spacy.cli.download = _deny_presidio_model_download
+                try:
+                    provider = NlpEngineProvider(
+                        nlp_configuration={
+                            "nlp_engine_name": "spacy",
+                            "models": [
+                                {
+                                    "lang_code": "en",
+                                    "model_name": self.config.presidio_model,
+                                }
+                            ],
                         }
-                    ],
-                }
-            )
-            nlp_engine = provider.create_engine()
-            enhancer = (
-                LemmaContextAwareEnhancer() if LemmaContextAwareEnhancer else None
-            )
-            arguments: dict[str, Any] = {
-                "nlp_engine": nlp_engine,
-                "supported_languages": ["en"],
-                "log_decision_process": False,
-            }
-            if enhancer is not None:
-                arguments["context_aware_enhancer"] = enhancer
-            self.analyzer = AnalyzerEngine(**arguments)
-        except Exception as exc:
-            self.analyzer = None
-            self.analyzer_error = _safe_error_type(exc)
+                    )
+                    nlp_engine = provider.create_engine()
+                    enhancer = (
+                        LemmaContextAwareEnhancer()
+                        if LemmaContextAwareEnhancer
+                        else None
+                    )
+                    arguments: dict[str, Any] = {
+                        "nlp_engine": nlp_engine,
+                        "supported_languages": ["en"],
+                        "log_decision_process": False,
+                    }
+                    if enhancer is not None:
+                        arguments["context_aware_enhancer"] = enhancer
+                    self.analyzer = AnalyzerEngine(**arguments)
+                finally:
+                    spacy.cli.download = original_download
+            except Exception as exc:
+                self.analyzer = None
+                self.analyzer_error = _safe_error_type(exc)
+            finally:
+                self._analyzer_initialization_complete.set()
 
     def _regex_findings(self, text: str) -> list[EntityFinding]:
         findings: list[EntityFinding] = []
@@ -1386,6 +1447,8 @@ class PrivacyEngine:
     def _presidio_findings(self, text: str) -> list[EntityFinding]:
         self._initialize_presidio()
         if self.analyzer is None:
+            if self.analyzer_error is None:
+                self.analyzer_error = "presidio_analyzer_unavailable"
             return []
         try:
             results = self.analyzer.analyze(
@@ -3356,10 +3419,13 @@ class BedrockGuardrailSystem:
             "pass" if self.config.aws_mode != "live" else "warn",
             self.config.aws_mode,
         )
+        presidio_required = (
+            self.config.presidio_mode == "required" or self.profile.presidio_required
+        )
         if self.config.presidio_mode == "disabled":
             add(
                 "presidio",
-                "fail" if self.profile.presidio_required else "warn",
+                "fail" if presidio_required else "warn",
                 "disabled; deterministic recognizers remain active",
             )
         else:
@@ -3367,7 +3433,7 @@ class BedrockGuardrailSystem:
             if self.privacy.analyzer is not None:
                 add("presidio_engine", "pass", self.config.presidio_model)
             else:
-                status = "fail" if self.profile.presidio_required else "warn"
+                status = "fail" if presidio_required else "warn"
                 add(
                     "presidio_engine",
                     status,
@@ -3908,7 +3974,6 @@ def _parse_context_argument(raw: str | None, path: str | None) -> dict[str, Any]
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="orchestrator.py",
         description=f"{PRODUCT_NAME} {__version__}",
     )
     parser.add_argument("--policy", help="Policy JSON path")

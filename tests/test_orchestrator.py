@@ -5,12 +5,14 @@ import base64
 import io
 import json
 import os
+import socket
 import sys
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -258,21 +260,300 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(config.aws_mode, "preview")
         self.assertEqual(config.max_input_chars, 4096)
 
-    def test_doctor_checks_required_presidio_engine_initialization(self):
+    def test_direct_one_file_paths_remain_script_relative(self):
+        with tempfile.TemporaryDirectory(prefix="guardrail-working-directory-") as root:
+            working_directory = Path(root)
+            with (
+                patch.object(app, "RUNNING_AS_PACKAGE", False),
+                patch("orchestrator.Path.cwd", return_value=working_directory),
+            ):
+                config = app.RuntimeConfig.from_env(
+                    policy_path="policy.json",
+                    profiles_path="profiles.json",
+                    data_dir="state",
+                )
+                default_config = app.RuntimeConfig.from_env()
+        self.assertEqual(config.policy_path, PROJECT_ROOT / "policy.json")
+        self.assertEqual(config.profiles_path, PROJECT_ROOT / "profiles.json")
+        self.assertEqual(config.data_dir, PROJECT_ROOT / "state")
+        self.assertEqual(default_config.data_dir, PROJECT_ROOT / ".guardrail-data")
+
+    def test_installed_package_paths_use_packaged_policies_and_local_state(self):
+        with tempfile.TemporaryDirectory(prefix="guardrail-working-directory-") as root:
+            working_directory = Path(root)
+            with (
+                patch.object(app, "RUNNING_AS_PACKAGE", True),
+                patch("orchestrator.Path.cwd", return_value=working_directory),
+            ):
+                config = app.RuntimeConfig.from_env(
+                    policy_path="custom-policy.json",
+                    profiles_path="custom-profiles.json",
+                    data_dir="state",
+                )
+                default_config = app.RuntimeConfig.from_env()
+        # Path.resolve() can expand a Windows 8.3 alias such as RUNNER~1 to its
+        # long form, so compare the canonical paths rather than their spellings.
+        resolved_working_directory = working_directory.resolve(strict=False)
+        self.assertEqual(
+            config.policy_path,
+            resolved_working_directory / "custom-policy.json",
+        )
+        self.assertEqual(
+            config.profiles_path,
+            resolved_working_directory / "custom-profiles.json",
+        )
+        self.assertEqual(config.data_dir, resolved_working_directory / "state")
+        self.assertEqual(
+            default_config.policy_path, PROJECT_ROOT / "guardrail_policy.json"
+        )
+        self.assertEqual(
+            default_config.profiles_path,
+            PROJECT_ROOT / "guardrail_policy_profiles.json",
+        )
+        self.assertEqual(
+            default_config.data_dir,
+            resolved_working_directory / ".guardrail-data",
+        )
+
+    def test_doctor_fails_when_mode_or_profile_requires_presidio(self):
         with (
             patch.object(app, "PRESIDIO_AVAILABLE", False),
             patch.object(app, "PRESIDIO_IMPORT_ERROR", "SyntheticUnavailable"),
         ):
-            config = replace(
-                self.config, profile_name="production", presidio_mode="required"
-            )
+            for profile_name, presidio_mode in (
+                ("balanced", "required"),
+                ("production", "auto"),
+            ):
+                with self.subTest(
+                    profile_name=profile_name, presidio_mode=presidio_mode
+                ):
+                    config = replace(
+                        self.config,
+                        profile_name=profile_name,
+                        presidio_mode=presidio_mode,
+                    )
+                    system = app.BedrockGuardrailSystem(config, privacy_key=TEST_KEY)
+                    report = system.doctor()
+                    check = next(
+                        item
+                        for item in report["checks"]
+                        if item["name"] == "presidio_engine"
+                    )
+                    self.assertEqual(check["status"], "fail")
+                    self.assertFalse(report["ready"])
+
+    def test_missing_presidio_model_stops_before_provider_or_download(self):
+        fake_spacy = MagicMock()
+        fake_spacy.util.is_package.return_value = False
+        fake_provider = MagicMock()
+        with (
+            patch.object(app, "PRESIDIO_AVAILABLE", True),
+            patch.object(app, "spacy", fake_spacy),
+            patch.object(app, "NlpEngineProvider", fake_provider),
+            patch.object(socket, "create_connection") as network_call,
+        ):
+            config = replace(self.config, presidio_mode="required")
             system = app.BedrockGuardrailSystem(config, privacy_key=TEST_KEY)
             report = system.doctor()
-        check = next(
-            item for item in report["checks"] if item["name"] == "presidio_engine"
-        )
-        self.assertEqual(check["status"], "fail")
         self.assertFalse(report["ready"])
+        self.assertEqual(system.privacy.analyzer_error, "presidio_model_unavailable")
+        fake_provider.assert_not_called()
+        fake_spacy.cli.download.assert_not_called()
+        network_call.assert_not_called()
+
+    def test_presidio_provider_cannot_invoke_runtime_download(self):
+        fake_spacy = MagicMock()
+        fake_spacy.util.is_package.return_value = True
+        original_download = fake_spacy.cli.download
+        fake_provider = MagicMock()
+        fake_provider.return_value.create_engine.side_effect = lambda: (
+            fake_spacy.cli.download("en_core_web_sm")
+        )
+        with (
+            patch.object(app, "PRESIDIO_AVAILABLE", True),
+            patch.object(app, "spacy", fake_spacy),
+            patch.object(app, "NlpEngineProvider", fake_provider),
+            patch.object(socket, "create_connection") as network_call,
+        ):
+            config = replace(self.config, presidio_mode="required")
+            system = app.BedrockGuardrailSystem(config, privacy_key=TEST_KEY)
+            report = system.doctor()
+        self.assertFalse(report["ready"])
+        self.assertEqual(system.privacy.analyzer_error, "RuntimeError")
+        original_download.assert_not_called()
+        network_call.assert_not_called()
+        self.assertIs(fake_spacy.cli.download, original_download)
+
+    def test_concurrent_presidio_initialization_waits_for_ready_analyzer(self):
+        initialization_started = threading.Event()
+        release_initialization = threading.Event()
+        second_lock_attempted = threading.Event()
+        results = {}
+        errors = {}
+
+        class RecordingLock:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.entered_by = []
+
+            def __enter__(self):
+                self.entered_by.append(threading.current_thread().name)
+                if threading.current_thread().name == "presidio-second":
+                    second_lock_attempted.set()
+                self.lock.acquire()
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                del exc_type, exc_value, traceback
+                self.lock.release()
+
+        class BlockingProvider:
+            def __init__(self, **kwargs):
+                del kwargs
+
+            def create_engine(self):
+                initialization_started.set()
+                if not release_initialization.wait(5):
+                    raise RuntimeError("Presidio test initialization timed out")
+                return object()
+
+        def evaluate(system, name):
+            try:
+                results[name] = system.privacy.evaluate("A safe request.", "input")
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors[name] = exc
+
+        fake_spacy = MagicMock()
+        analyzer = MagicMock()
+        analyzer.analyze.return_value = []
+        initialization_lock = RecordingLock()
+        config = replace(self.config, presidio_mode="required")
+        system = app.BedrockGuardrailSystem(config, privacy_key=TEST_KEY)
+        first = threading.Thread(
+            target=evaluate, args=(system, "first"), name="presidio-first"
+        )
+        second = threading.Thread(
+            target=evaluate, args=(system, "second"), name="presidio-second"
+        )
+        with (
+            patch.object(app, "PRESIDIO_AVAILABLE", True),
+            patch.object(app, "_presidio_model_is_installed", return_value=True),
+            patch.object(app, "spacy", fake_spacy),
+            patch.object(app, "NlpEngineProvider", BlockingProvider),
+            patch.object(app, "AnalyzerEngine", return_value=analyzer),
+            patch.object(app, "LemmaContextAwareEnhancer", None),
+            patch.object(app, "_PRESIDIO_INITIALIZATION_LOCK", initialization_lock),
+        ):
+            first.start()
+            try:
+                self.assertTrue(initialization_started.wait(2))
+                second.start()
+                self.assertTrue(second_lock_attempted.wait(2))
+            finally:
+                release_initialization.set()
+                first.join(5)
+                if second.ident is not None:
+                    second.join(5)
+            warmed_result = system.privacy.evaluate("Another safe request.", "input")
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, {})
+        self.assertEqual(set(results), {"first", "second"})
+        self.assertTrue(
+            all(result.engine_status == "available" for result in results.values())
+        )
+        self.assertTrue(all(result.engine_error is None for result in results.values()))
+        self.assertEqual(warmed_result.engine_status, "available")
+        self.assertEqual(
+            initialization_lock.entered_by, ["presidio-first", "presidio-second"]
+        )
+        self.assertEqual(analyzer.analyze.call_count, 3)
+
+    def test_concurrent_presidio_initialization_failure_is_shared(self):
+        initialization_started = threading.Event()
+        release_initialization = threading.Event()
+        second_started = threading.Event()
+        results = {}
+        errors = {}
+
+        class FailingProvider:
+            def __init__(self, **kwargs):
+                del kwargs
+
+            def create_engine(self):
+                initialization_started.set()
+                if not release_initialization.wait(5):
+                    raise RuntimeError("Presidio test initialization timed out")
+                raise RuntimeError("Synthetic Presidio initialization failure")
+
+        def evaluate(system, name):
+            if name == "second":
+                second_started.set()
+            try:
+                results[name] = system.privacy.evaluate("A safe request.", "input")
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors[name] = exc
+
+        fake_spacy = MagicMock()
+        original_download = fake_spacy.cli.download
+        analyzer_factory = MagicMock()
+        config = replace(self.config, presidio_mode="required")
+        system = app.BedrockGuardrailSystem(config, privacy_key=TEST_KEY)
+        first = threading.Thread(
+            target=evaluate, args=(system, "first"), name="presidio-failing-first"
+        )
+        second = threading.Thread(
+            target=evaluate, args=(system, "second"), name="presidio-failing-second"
+        )
+        with (
+            patch.object(app, "PRESIDIO_AVAILABLE", True),
+            patch.object(app, "_presidio_model_is_installed", return_value=True),
+            patch.object(app, "spacy", fake_spacy),
+            patch.object(app, "NlpEngineProvider", FailingProvider),
+            patch.object(app, "AnalyzerEngine", analyzer_factory),
+            patch.object(app, "LemmaContextAwareEnhancer", None),
+        ):
+            first.start()
+            try:
+                self.assertTrue(initialization_started.wait(2))
+                second.start()
+                self.assertTrue(second_started.wait(2))
+            finally:
+                release_initialization.set()
+                first.join(5)
+                if second.ident is not None:
+                    second.join(5)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, {})
+        self.assertEqual(set(results), {"first", "second"})
+        for result in results.values():
+            self.assertEqual(result.engine_status, "degraded")
+            self.assertEqual(result.engine_error, "RuntimeError")
+            self.assertIn(
+                "presidio_unavailable", {item.category for item in result.detections}
+            )
+        analyzer_factory.assert_not_called()
+        self.assertIs(fake_spacy.cli.download, original_download)
+
+    def test_missing_presidio_analyzer_state_fails_closed(self):
+        config = replace(self.config, presidio_mode="required")
+        system = app.BedrockGuardrailSystem(config, privacy_key=TEST_KEY)
+        system.privacy.analyzer_attempted = True
+
+        result = system.privacy.evaluate("A safe request.", "input")
+
+        self.assertEqual(result.engine_status, "degraded")
+        self.assertEqual(result.engine_error, "presidio_analyzer_unavailable")
+        self.assertIn(
+            "presidio_unavailable", {item.category for item in result.detections}
+        )
+
+    def test_presidio_model_must_be_an_installed_package_name(self):
+        with self.assertRaises(app.ConfigurationError):
+            replace(self.config, presidio_model="../untrusted/model").validate()
 
     def test_direct_configuration_limits_are_validated(self):
         with self.assertRaises(app.ConfigurationError):
@@ -383,6 +664,13 @@ class InputValidationTests(GuardrailTestCase):
     def test_unknown_context_field_is_rejected(self):
         with self.assertRaises(app.InputValidationError):
             self.make_system().process("hello", {"unknown": True}, record=False)
+
+    def test_request_cannot_select_runtime_paths_or_model(self):
+        for field in ("policy_path", "profiles_path", "data_dir", "presidio_model"):
+            with self.subTest(field=field), self.assertRaises(app.InputValidationError):
+                self.make_system().process(
+                    "hello", {field: "untrusted-value"}, record=False
+                )
 
     def test_reserved_context_profile_is_rejected(self):
         with self.assertRaises(app.InputValidationError):

@@ -19,6 +19,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements-dev.txt
+python -m pip install -e .
 ```
 
 Optional integration packages:
@@ -31,15 +32,20 @@ python -m pip install -r requirements-presidio.txt
 ## Required checks
 
 ```powershell
-ruff format --check orchestrator.py tests
-ruff check orchestrator.py tests
+ruff format --check __init__.py orchestrator.py examples scripts tests
+ruff check __init__.py orchestrator.py examples scripts tests
+python scripts/check_public_markdown.py
 python -m unittest discover -s tests -v
 python orchestrator.py --presidio-mode disabled self-test
 python orchestrator.py --presidio-mode disabled red-team
+python examples/run_sanitized_demo.py
+python -m build
+python -m twine check dist/*
 bandit -c pyproject.toml -r orchestrator.py
 pip-audit -r requirements-aws.txt
 pip-audit -r requirements-presidio.txt
 pip-audit -r requirements-dev.txt
+pip-audit -r requirements-build.txt
 ```
 
 No test or pull request should require live AWS credentials. Use injected clients and synthetic responses for AWS integration behavior.

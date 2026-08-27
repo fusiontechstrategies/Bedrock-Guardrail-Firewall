@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .python-version
-.venv/
+.venv*/
 venv/
 env/
 
@@ -16,6 +16,9 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 .tox/
+build/
+dist/
+*.egg-info/
 .ci-data*/
 .final-check/
 .integration-check/
