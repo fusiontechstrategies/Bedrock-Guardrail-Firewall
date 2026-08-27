@@ -14,10 +14,10 @@ from unittest.mock import MagicMock, patch
 PROJECT_NAME = "bedrock-guardrail-firewall"
 EXPECTED_VERSION = "4.1.0.dev0"
 EXPECTED_REQUIRES_DIST = {
-    'boto3==1.43.77; extra == "aws"',
-    'botocore==1.43.77; extra == "aws"',
+    'boto3==1.43.79; extra == "aws"',
+    'botocore==1.43.79; extra == "aws"',
     'presidio-analyzer==2.2.364; python_version < "3.14" and extra == "presidio"',
-    'spacy==3.8.15; python_version < "3.14" and extra == "presidio"',
+    'spacy==3.8.16; python_version < "3.14" and extra == "presidio"',
 }
 EXPECTED_RESOURCES = {
     "__init__.py",
