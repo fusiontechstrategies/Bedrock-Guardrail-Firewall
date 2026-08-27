@@ -408,8 +408,8 @@ class ConfigurationTests(unittest.TestCase):
                 self.lock.release()
 
         class BlockingProvider:
-            def __init__(self, **kwargs):
-                del kwargs
+            def __init__(self, **_kwargs):
+                pass
 
             def create_engine(self):
                 initialization_started.set()
@@ -478,8 +478,8 @@ class ConfigurationTests(unittest.TestCase):
         errors = {}
 
         class FailingProvider:
-            def __init__(self, **kwargs):
-                del kwargs
+            def __init__(self, **_kwargs):
+                pass
 
             def create_engine(self):
                 initialization_started.set()

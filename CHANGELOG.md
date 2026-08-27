@@ -23,6 +23,7 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 - Distribution metadata uses `4.1.0.dev0` to identify development toward the next minor version without presenting it as a release
 - Quick start now covers a clean Windows, Linux, or macOS source installation
 - GitHub workflows avoid retaining checkout credentials and Dependabot updates use explicit cooldowns
+- Test doubles avoid unnecessary wrappers and local-variable deletion flagged by CodeQL
 
 ### Security
 
