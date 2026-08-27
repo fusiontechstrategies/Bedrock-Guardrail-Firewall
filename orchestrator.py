@@ -1941,7 +1941,7 @@ class BedrockGuardrailAdapter:
                 {
                     "text": {
                         "text": (
-                            f"<omitted:{len(value)} chars:{_sha256_text(value)[:12]}>"
+                            f"[omitted:{len(value)} chars:{_sha256_text(value)[:12]}]"
                         ),
                         "qualifiers": list(text_block.get("qualifiers", [])),
                     }
