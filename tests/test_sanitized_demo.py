@@ -125,8 +125,11 @@ class SanitizedDemoTests(unittest.TestCase):
         self.assertIn("create_connection", report["network_enforcement"]["operations"])
 
     def test_network_guard_denies_socket_and_resolution_entry_points(self):
+        def create_socket():
+            return socket.socket()
+
         attempts = {
-            "socket": lambda: socket.socket(),
+            "socket": create_socket,
             "create_connection": lambda: socket.create_connection(
                 ("example.invalid", 443)
             ),
