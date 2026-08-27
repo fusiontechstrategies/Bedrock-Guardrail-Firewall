@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This guide covers safe local use, optional Microsoft Presidio installation, authorized Amazon Bedrock Guardrails integration, and AWS Lambda deployment for Bedrock Guardrail Firewall 4.0.0.
+This guide covers safe local use, optional Microsoft Presidio installation, authorized Amazon Bedrock Guardrails integration, and AWS Lambda deployment for the current source tree. Unreleased distribution builds use `4.1.0.dev0` to identify development toward the next minor version, not as a release version.
 
 The runtime does not invoke a foundation model. It evaluates supplied input and optional candidate output, then returns a security decision and sanitized content.
 
@@ -237,12 +237,13 @@ Queue messages contain metadata only. Raw prompt text, candidate output, identit
 
 ## Lambda deployment
 
-The module exports `lambda_handler`.
+The source module exports `lambda_handler`. A portable source bundle uses the handler `orchestrator.lambda_handler`; an installed wheel uses `bedrock_guardrail_firewall.orchestrator.lambda_handler`.
 
 Recommended configuration:
 
 - Use a supported Python runtime.
 - Package `orchestrator.py`, `guardrail_policy.json`, and `guardrail_policy_profiles.json` together.
+- Alternatively, install the reviewed wheel into the deployment artifact; it carries both default policy documents as package data.
 - Provide `boto3` in the deployment package when exact SDK behavior must be pinned.
 - Put Presidio and its NLP model in a Lambda layer or container image if required.
 - Set `GUARDRAIL_DATA_DIR` to `/tmp/guardrail-data`.
@@ -251,6 +252,8 @@ Recommended configuration:
 - Set reserved concurrency and API throttles appropriate to the workload.
 - Use an authorizer to provide classification, role, clearance, tenant, and user identity.
 - Disable payload logging in API Gateway and Lambda observability configurations.
+
+The command-line and library defaults keep runtime state in `.guardrail-data` under the process working directory. Lambda deployments should always override that default with `GUARDRAIL_DATA_DIR=/tmp/guardrail-data` as described above.
 
 Lambda treats deployment-time `GUARDRAIL_AWS_MODE=live` as operator authorization. Protect environment and deployment permissions accordingly.
 

@@ -8,31 +8,31 @@ This protects real workloads while still validating request construction, respon
 
 ## Completed local baseline
 
-Release preparation for version 4.0.0 completed the following checks:
+The published source history identifies a 4.0.0 baseline. Packaging and adoption work under `Unreleased` uses `4.1.0.dev0` to identify development toward the next minor version until a release version is separately approved. The table records point-in-time local validation and must be refreshed for any release candidate.
 
 | Check | Result |
 | --- | --- |
-| Automated unit and integration tests | 163 passed with all optional integrations installed |
-| Branch-aware line coverage | 85 percent |
+| Automated unit and integration tests | 177 passed with all optional integrations installed on Python 3.12 |
+| Branch-aware line coverage | 86 percent |
 | Built-in self-test | 7 of 7 passed |
 | Built-in adversarial suite | 10 of 10 contained |
 | Deterministic mutation suite | 100 rounds completed |
-| Native Windows Python 3.10 | 163 discovered, 160 passed, 3 optional integration checks skipped in base environment |
-| Native Windows Python 3.11 | 163 discovered, 160 passed, 3 optional integration checks skipped in base environment |
-| Native Windows Python 3.12 | 163 discovered, 161 passed, 2 optional Presidio checks skipped in base environment |
-| Native Windows Python 3.13 | 163 discovered, 161 passed, 2 optional Presidio checks skipped in base environment |
-| Native Windows Python 3.14 | 163 discovered, 160 passed, 3 optional integration checks skipped in base environment |
-| Isolated pinned AWS and Presidio Python 3.12 environment | All 163 passed |
+| Native Windows Python 3.12 | All 177 passed in the isolated pinned AWS and Presidio environment |
+| Windows and Linux Python 3.10 through 3.14 | Configured as a required CI matrix; the unreleased branch must pass it before release |
+| Missing Presidio model package check | Readiness failed before provider construction, download, socket creation, connection, or name resolution |
+| Package validation | Wheel and source distribution built; metadata, isolated install, library import, console entry point, packaged policies, and default local state passed |
+| Sanitized adoption fixture | 6 of 6 expected decisions and 4 of 4 high-risk containment cases passed with zero evaluation-time Python socket attempts and zero serialized high-risk values |
 | Python compilation | Passed |
 | Ruff formatting | Passed |
 | Ruff linting | Passed |
 | Bandit | No medium or high findings |
-| AWS dependency audit | No known vulnerabilities |
-| Presidio dependency audit | No known vulnerabilities in auditable packages |
-| Development dependency audit | No known vulnerabilities |
+| AWS dependency audit | No advisories reported by `pip-audit` for the resolvable pinned set at validation time |
+| Presidio dependency audit | No advisories reported for packages resolved by `pip-audit`; the direct model wheel is SHA-256 pinned but is outside the PyPI advisory lookup |
+| Development dependency audit | No advisories reported by `pip-audit` for the resolvable pinned set at validation time |
+| Distribution build dependency audit | No advisories reported by `pip-audit` for the resolvable pinned set at validation time |
 | Secret scan | No credentials accepted after synthetic-fixture review |
 
-Dependency results are a point-in-time statement. Continuous scanning is configured because vulnerability data changes.
+Dependency results are point-in-time statements, not guarantees that a package has no vulnerability. Advisory data, package resolution, and audit coverage can change. Continuous scanning is configured accordingly.
 
 ## Automated coverage areas
 
@@ -156,13 +156,17 @@ python orchestrator.py --presidio-mode disabled chaos-test --rounds 100
 Static and dependency checks:
 
 ```powershell
-ruff format --check orchestrator.py tests
-ruff check orchestrator.py tests
+ruff format --check __init__.py orchestrator.py examples scripts tests
+ruff check __init__.py orchestrator.py examples scripts tests
+python scripts/check_public_markdown.py
 bandit -c pyproject.toml -r orchestrator.py
 pip-audit -r requirements-aws.txt
 pip-audit -r requirements-presidio.txt
 pip-audit -r requirements-dev.txt
+pip-audit -r requirements-build.txt
 gitleaks detect --no-git --source . --redact
+python -m build
+python -m twine check dist/*
 ```
 
 Coverage:
@@ -180,6 +184,8 @@ GitHub Actions is configured to run:
 - Python 3.10, 3.11, 3.12, 3.13, and 3.14
 - Pinned AWS SDK contract validation
 - Pinned Presidio engine and redaction validation
+- Wheel and source-distribution build plus isolated installed-CLI validation
+- Deterministic sanitized adoption fixture
 - Formatting and lint checks
 - Static-security analysis
 - Dependency vulnerability audits
