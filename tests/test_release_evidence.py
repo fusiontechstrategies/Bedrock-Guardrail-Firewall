@@ -14,15 +14,24 @@ from scripts import prepare_release_evidence as release
 VERSION = "4.1.0"
 TAG = f"v{VERSION}"
 COMMIT = "a" * 40
-METADATA = f"""Metadata-Version: 2.4
+METADATA = (
+    f"""Metadata-Version: 2.4
 Name: bedrock-guardrail-firewall
 Version: {VERSION}
 Requires-Python: >=3.10
 License-Expression: Apache-2.0
 Description-Content-Type: text/markdown
-
-Synthetic package description.
-""".encode()
+Provides-Extra: aws
+Requires-Dist: boto3==1.43.79; extra == "aws"
+Requires-Dist: botocore==1.43.79; extra == "aws"
+Provides-Extra: presidio
+"""
+    'Requires-Dist: presidio-analyzer==2.2.364; python_version < "3.14" '
+    'and extra == "presidio"\n'
+    'Requires-Dist: spacy==3.8.16; python_version < "3.14" '
+    'and extra == "presidio"\n\n'
+    "Synthetic package description.\n"
+).encode()
 
 
 class ReleaseEvidenceTests(unittest.TestCase):
@@ -42,6 +51,15 @@ class ReleaseEvidenceTests(unittest.TestCase):
             f"## [{VERSION}] - 2026-08-27\n\n"
             f"[{VERSION}]: https://github.com/fusiontechstrategies/"
             f"Bedrock-Guardrail-Firewall/compare/v4.0.0...v{VERSION}\n",
+            encoding="utf-8",
+        )
+        (root / "requirements-aws.txt").write_text(
+            "boto3==1.43.79\nbotocore==1.43.79\n", encoding="utf-8"
+        )
+        (root / "requirements-presidio.txt").write_text(
+            "presidio-analyzer==2.2.364\nspacy==3.8.16\n"
+            "https://example.invalid/"
+            "en_core_web_sm-3.8.0-py3-none-any.whl#sha256=" + "a" * 64 + "\n",
             encoding="utf-8",
         )
 
@@ -96,9 +114,101 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 (output / "release-evidence.json").read_text(encoding="utf-8")
             )
             self.assertEqual(saved, document)
+            sbom_path = output / f"bedrock-guardrail-firewall-{VERSION}.spdx.json"
+            sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+            self.assertEqual(sbom["spdxVersion"], "SPDX-2.3")
+            self.assertEqual(sbom["dataLicense"], "CC0-1.0")
+            self.assertEqual(len(sbom["packages"]), 6)
+            dependency_relationships = [
+                item
+                for item in sbom["relationships"]
+                if item["relationshipType"] == "OPTIONAL_DEPENDENCY_OF"
+            ]
+            self.assertEqual(len(dependency_relationships), 5)
+            self.assertEqual(
+                {item["name"] for item in sbom["packages"][1:]},
+                {
+                    "boto3",
+                    "botocore",
+                    "en-core-web-sm",
+                    "presidio-analyzer",
+                    "spacy",
+                },
+            )
+            model = next(
+                item for item in sbom["packages"] if item["name"] == "en-core-web-sm"
+            )
+            self.assertEqual(
+                model["downloadLocation"],
+                "https://example.invalid/en_core_web_sm-3.8.0-py3-none-any.whl",
+            )
+            self.assertEqual(
+                model["checksums"],
+                [{"algorithm": "SHA256", "checksumValue": "a" * 64}],
+            )
+            self.assertEqual(document["sbom"]["file"], sbom_path.name)
             manifest = (output / "SHA256SUMS.txt").read_text(encoding="utf-8")
-            self.assertEqual(len(manifest.splitlines()), 3)
+            self.assertEqual(len(manifest.splitlines()), 4)
             self.assertIn("*release-evidence.json", manifest)
+            self.assertIn(f"*{sbom_path.name}", manifest)
+
+    def test_optional_requirements_must_be_exact_pins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_source(root)
+            (root / "requirements-aws.txt").write_text(
+                "boto3>=1.43.79\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "not an exact package pin"
+            ):
+                release.parse_optional_dependencies(root)
+
+    def test_direct_model_wheel_requires_sha256(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_source(root)
+            (root / "requirements-presidio.txt").write_text(
+                "presidio-analyzer==2.2.364\nspacy==3.8.16\n"
+                "https://example.invalid/"
+                "en_core_web_sm-3.8.0-py3-none-any.whl\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "Unexpected direct requirement URL"
+            ):
+                release.parse_optional_dependencies(root)
+
+    def test_direct_model_wheel_must_be_platform_independent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_source(root)
+            (root / "requirements-presidio.txt").write_text(
+                "presidio-analyzer==2.2.364\nspacy==3.8.16\n"
+                "https://example.invalid/"
+                "en_core_web_sm-3.8.0-cp312-cp312-win_amd64.whl#sha256="
+                + "a" * 64
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "not platform independent"
+            ):
+                release.parse_direct_wheel_dependencies(root)
+
+    def test_wheel_dependencies_must_match_requirement_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_source(root)
+            (root / "requirements-aws.txt").write_text(
+                "boto3==1.43.78\nbotocore==1.43.79\n", encoding="utf-8"
+            )
+            dist = root / "dist"
+            self.make_distributions(dist)
+            with self.assertRaisesRegex(release.ReleaseEvidenceError, "do not match"):
+                release.prepare_release_evidence(
+                    root, dist, root / "evidence", TAG, COMMIT
+                )
 
     def test_release_tag_must_match_stable_source_version(self):
         with tempfile.TemporaryDirectory() as directory:

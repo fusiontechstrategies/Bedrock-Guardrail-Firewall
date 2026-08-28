@@ -21,7 +21,7 @@ The package name must be checked again immediately before setup and publication.
 4. Run the complete supported Python matrix, optional integration tests, quality checks, security scans, dependency audits, package tests, and sanitized demo.
 5. Set `SOURCE_DATE_EPOCH` to the release commit time, build distributions twice into separate empty directories, normalize each source archive with `scripts/normalize_sdist.py`, require identical filenames and bytes, and run `twine check`.
 6. Confirm the checked-out commit matches the release event, then run `scripts/prepare_release_evidence.py` with the proposed tag and exact 40-character commit ID. It rejects development versions, mismatched identities, unsafe archive members, unexpected distribution files, incomplete metadata, and an existing evidence directory.
-7. Inspect both archives, `release-evidence.json`, and `SHA256SUMS.txt` before approval.
+7. Inspect both archives, the SPDX 2.3 dependency SBOM, `release-evidence.json`, and `SHA256SUMS.txt` before approval.
 
 The `Release candidate` workflow can be started manually with the proposed tag to test its build, evidence, and provenance jobs. A manual run never creates or changes a GitHub release and never publishes to PyPI.
 
@@ -30,11 +30,11 @@ The `Release candidate` workflow can be started manually with the proposed tag t
 1. Merge only after branch protections and every required check pass.
 2. Create the immutable `vX.Y.Z` tag from the approved merge commit.
 3. Wait for the release-candidate workflow to build and attest the distributions and populate the draft GitHub release.
-4. Confirm the draft contains exactly four assets: the wheel, source distribution, `SHA256SUMS.txt`, and `release-evidence.json`. Review their provenance and contents along with the release notes.
+4. Confirm the draft contains exactly five assets: the wheel, source distribution, SPDX 2.3 dependency SBOM, `SHA256SUMS.txt`, and `release-evidence.json`. Review their provenance and contents along with the release notes.
 5. Publish the GitHub release only after explicit release approval.
 6. Approve the protected `pypi` environment after the publish workflow has downloaded and reverified the exact public release assets.
 
-The candidate workflow creates GitHub build-provenance attestations and attaches the wheel, source distribution, checksums, and evidence to a draft GitHub release. Existing draft assets are accepted only when their bytes match and different bytes are never overwritten. The workflow rejects extra draft assets. Publishing the reviewed draft starts a separate workflow that first requires the same exact four-asset set, recreates and compares the evidence, and then sends those exact downloaded distributions to PyPI through trusted publishing. An existing PyPI version is not skipped silently.
+The candidate workflow creates GitHub build-provenance attestations and attaches the wheel, source distribution, SPDX 2.3 dependency SBOM, checksums, and evidence to a draft GitHub release. Existing draft assets are accepted only when their bytes match and different bytes are never overwritten. The workflow rejects extra draft assets. Publishing the reviewed draft starts a separate workflow that first requires the same exact five-asset set, recreates and compares the evidence, and then sends those exact downloaded distributions to PyPI through trusted publishing. An existing PyPI version is not skipped silently.
 
 ## Post-publication verification
 

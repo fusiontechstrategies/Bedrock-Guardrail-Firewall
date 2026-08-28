@@ -21,7 +21,7 @@ The published source history identifies a 4.0.0 baseline. Version 4.1.0 is the c
 | Windows and Linux Python 3.10 through 3.14 | Configured as a required CI matrix; the exact release commit must pass it before publication |
 | Missing Presidio model package check | Readiness failed before provider construction, download, socket creation, connection, or name resolution |
 | Package validation | Wheel and source distribution built; metadata, isolated install, library import, console entry point, packaged policies, default local state, missing-model failure, and full pinned Presidio initialization passed |
-| Release integrity | Repeat builds produced identical wheel and normalized source-distribution bytes; stable identity, archive safety, wheel RECORD, SHA-256 evidence, and non-overwrite checks passed |
+| Release integrity | Repeat builds produced identical wheel and normalized source-distribution bytes; stable identity, archive safety, wheel RECORD, SPDX 2.3 dependency SBOM, SHA-256 evidence, and non-overwrite checks passed |
 | Sanitized adoption fixture | 6 of 6 expected decisions and 4 of 4 high-risk containment cases passed with zero evaluation-time Python socket attempts and zero serialized high-risk values |
 | Python compilation | Passed |
 | Ruff formatting | Passed |
