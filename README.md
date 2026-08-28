@@ -127,7 +127,7 @@ The dependency groups are deliberately separated:
 
 The project includes conventional wheel and source-distribution metadata plus the `bedrock-guardrail-firewall` console command. Distribution metadata identifies version 4.1.0. No package is published by this repository automatically. Use only a registry release linked from this repository. The core installation command for an official PyPI release is `python -m pip install bedrock-guardrail-firewall`. If the linked PyPI project does not list 4.1.0, use the source installation above rather than an unverified package with a similar name.
 
-Release candidates use exact version, archive, metadata, SHA-256, provenance, and trusted-publisher gates documented in [RELEASING.md](RELEASING.md). Manual candidate runs cannot publish. Publishing requires an approved GitHub release and approval through the protected `pypi` environment.
+Release candidates use exact version, archive, metadata, SPDX 2.3 dependency SBOM, SHA-256, provenance, and trusted-publisher gates documented in [RELEASING.md](RELEASING.md). Manual candidate runs cannot publish. Publishing requires an approved GitHub release and approval through the protected `pypi` environment.
 
 ## AWS safety modes
 

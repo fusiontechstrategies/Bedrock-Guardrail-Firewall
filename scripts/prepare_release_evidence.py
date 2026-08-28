@@ -21,9 +21,17 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_NAME = "bedrock-guardrail-firewall"
 ARCHIVE_NAME = "bedrock_guardrail_firewall"
+REPOSITORY_URL = "https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall"
 STABLE_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 COMMIT_ID = re.compile(r"^[0-9a-f]{40}$")
 CHANGELOG_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+PINNED_REQUIREMENT = re.compile(
+    r"([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9.!+_-]*)"
+)
+OPTIONAL_REQUIREMENT_FILES = {
+    "aws": "requirements-aws.txt",
+    "presidio": "requirements-presidio.txt",
+}
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -68,6 +76,16 @@ def read_constant(path: Path, name: str) -> str:
     return matches[0]
 
 
+def read_release_date(source_root: Path, version: str) -> str:
+    changelog = (source_root / "CHANGELOG.md").read_text(encoding="utf-8")
+    matches = re.findall(
+        rf"(?m)^## \[{re.escape(version)}\] - ({CHANGELOG_DATE.pattern})$",
+        changelog,
+    )
+    require(len(matches) == 1, "Changelog release header is missing or ambiguous")
+    return matches[0]
+
+
 def validate_source_identity(source_root: Path, tag: str) -> str:
     version = read_project_version(source_root)
     require(
@@ -86,10 +104,7 @@ def validate_source_identity(source_root: Path, tag: str) -> str:
     )
 
     changelog = (source_root / "CHANGELOG.md").read_text(encoding="utf-8")
-    header = re.compile(
-        rf"(?m)^## \[{re.escape(version)}\] - {CHANGELOG_DATE.pattern}$"
-    )
-    require(header.search(changelog) is not None, "Changelog release header is missing")
+    read_release_date(source_root, version)
     link = re.compile(
         rf"(?m)^\[{re.escape(version)}\]: https://github\.com/"
         rf"fusiontechstrategies/Bedrock-Guardrail-Firewall/compare/.+\.\.\.v"
@@ -180,7 +195,143 @@ def parse_metadata(value: bytes, source: str):
     return document
 
 
-def validate_wheel(path: Path, version: str) -> None:
+def normalize_distribution_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def parse_optional_dependencies(source_root: Path) -> list[dict[str, str]]:
+    dependencies: list[dict[str, str]] = []
+    normalized_names: set[str] = set()
+    for group, filename in OPTIONAL_REQUIREMENT_FILES.items():
+        group_count = 0
+        for raw_line in (
+            (source_root / filename).read_text(encoding="utf-8").splitlines()
+        ):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("https://"):
+                require(
+                    group == "presidio" and "#sha256=" in line,
+                    f"Unexpected direct requirement URL in {filename}: {line!r}",
+                )
+                continue
+            match = PINNED_REQUIREMENT.fullmatch(line)
+            require(
+                match is not None,
+                f"Optional requirement is not an exact package pin: {line!r}",
+            )
+            name, version = match.groups()
+            normalized = normalize_distribution_name(name)
+            require(
+                normalized not in normalized_names,
+                f"Duplicate optional dependency: {name}",
+            )
+            normalized_names.add(normalized)
+            group_count += 1
+            dependencies.append(
+                {
+                    "group": group,
+                    "name": name,
+                    "normalized_name": normalized,
+                    "version": version,
+                }
+            )
+        require(group_count > 0, f"No package dependencies found in {filename}")
+    return sorted(dependencies, key=lambda item: item["normalized_name"])
+
+
+def parse_direct_wheel_dependencies(source_root: Path) -> list[dict[str, str]]:
+    dependencies: list[dict[str, str]] = []
+    requirement_path = source_root / OPTIONAL_REQUIREMENT_FILES["presidio"]
+    for raw_line in requirement_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("https://"):
+            continue
+        url, separator, digest = line.partition("#sha256=")
+        require(
+            bool(separator) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None,
+            f"Direct wheel requirement lacks an exact SHA-256 digest: {line!r}",
+        )
+        filename = url.rsplit("/", 1)[-1]
+        require(filename.endswith(".whl"), "Direct requirement is not a wheel")
+        wheel_parts = filename[:-4].split("-")
+        require(
+            len(wheel_parts) == 5,
+            f"Direct wheel filename is not a pure Python wheel: {filename!r}",
+        )
+        distribution, version, python_tag, abi_tag, platform_tag = wheel_parts
+        require(
+            (python_tag, abi_tag, platform_tag) == ("py3", "none", "any"),
+            f"Direct wheel is not platform independent: {filename!r}",
+        )
+        name = distribution.replace("_", "-")
+        require(
+            PINNED_REQUIREMENT.fullmatch(f"{name}=={version}") is not None,
+            f"Direct wheel has an invalid name or version: {filename!r}",
+        )
+        dependencies.append(
+            {
+                "download_location": url,
+                "group": "presidio",
+                "marker": "installed only through requirements-presidio.txt",
+                "name": name,
+                "normalized_name": normalize_distribution_name(name),
+                "sha256": digest,
+                "version": version,
+            }
+        )
+    require(
+        len(dependencies) == 1,
+        "requirements-presidio.txt must contain one pinned direct model wheel",
+    )
+    return dependencies
+
+
+def parse_wheel_dependencies(document) -> list[dict[str, str]]:
+    dependencies: list[dict[str, str]] = []
+    normalized_names: set[str] = set()
+    for raw_requirement in document.get_all("Requires-Dist") or []:
+        requirement = str(raw_requirement)
+        package, separator, marker = requirement.partition(";")
+        match = PINNED_REQUIREMENT.fullmatch(package.strip())
+        require(
+            match is not None,
+            f"Wheel dependency is not an exact package pin: {requirement!r}",
+        )
+        require(
+            bool(separator and marker.strip()),
+            "Wheel optional dependency lacks a marker",
+        )
+        groups = re.findall(r"""extra\s*==\s*["']([^"']+)["']""", marker)
+        require(
+            len(groups) == 1 and groups[0] in OPTIONAL_REQUIREMENT_FILES,
+            f"Wheel dependency has an unsupported extra marker: {requirement!r}",
+        )
+        name, version = match.groups()
+        normalized = normalize_distribution_name(name)
+        require(
+            normalized not in normalized_names,
+            f"Duplicate wheel dependency: {name}",
+        )
+        normalized_names.add(normalized)
+        dependencies.append(
+            {
+                "group": groups[0],
+                "marker": marker.strip(),
+                "name": name,
+                "normalized_name": normalized,
+                "version": version,
+            }
+        )
+    return sorted(dependencies, key=lambda item: item["normalized_name"])
+
+
+def validate_wheel(
+    path: Path,
+    version: str,
+    expected_dependencies: list[dict[str, str]],
+) -> list[dict[str, str]]:
     metadata_values: list[bytes] = []
     record_values: list[tuple[str, bytes]] = []
     required_members = {
@@ -230,6 +381,19 @@ def validate_wheel(path: Path, version: str) -> None:
     require(len(record_values) == 1, "Wheel must contain exactly one RECORD file")
     metadata = parse_metadata(metadata_values[0], path.name)
     require(metadata["Version"] == version, "Wheel metadata version mismatch")
+    dependencies = parse_wheel_dependencies(metadata)
+    expected_identity = {
+        (item["normalized_name"], item["version"], item["group"])
+        for item in expected_dependencies
+    }
+    actual_identity = {
+        (item["normalized_name"], item["version"], item["group"])
+        for item in dependencies
+    }
+    require(
+        actual_identity == expected_identity,
+        "Wheel optional dependencies do not match the pinned requirement files",
+    )
 
     record_name, record_value = record_values[0]
     record_rows: dict[str, tuple[str, str]] = {}
@@ -268,6 +432,7 @@ def validate_wheel(path: Path, version: str) -> None:
             recorded_size == str(len(value)),
             f"Wheel RECORD size mismatch: {recorded_name!r}",
         )
+    return dependencies
 
 
 def validate_sdist(path: Path, version: str) -> None:
@@ -319,6 +484,107 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def dependency_spdx_id(index: int, normalized_name: str) -> str:
+    safe_name = re.sub(r"[^A-Za-z0-9.-]", "-", normalized_name)
+    return f"SPDXRef-Dependency-{index:03d}-{safe_name}"
+
+
+def build_spdx(
+    version: str,
+    release_date: str,
+    wheel_digest: str,
+    dependencies: list[dict[str, str]],
+) -> bytes:
+    root_id = "SPDXRef-Package"
+    packages: list[dict[str, object]] = [
+        {
+            "SPDXID": root_id,
+            "checksums": [{"algorithm": "SHA256", "checksumValue": wheel_digest}],
+            "copyrightText": "NOASSERTION",
+            "downloadLocation": "NOASSERTION",
+            "externalRefs": [
+                {
+                    "referenceCategory": "PACKAGE-MANAGER",
+                    "referenceLocator": (f"pkg:pypi/{PROJECT_NAME}@{version}"),
+                    "referenceType": "purl",
+                }
+            ],
+            "filesAnalyzed": False,
+            "licenseConcluded": "Apache-2.0",
+            "licenseDeclared": "Apache-2.0",
+            "name": PROJECT_NAME,
+            "supplier": "Organization: Fusion Technology Strategies",
+            "versionInfo": version,
+        }
+    ]
+    relationships: list[dict[str, str]] = [
+        {
+            "spdxElementId": "SPDXRef-DOCUMENT",
+            "relationshipType": "DESCRIBES",
+            "relatedSpdxElement": root_id,
+        }
+    ]
+    for index, dependency in enumerate(dependencies, start=1):
+        package_id = dependency_spdx_id(index, dependency["normalized_name"])
+        package: dict[str, object] = {
+            "SPDXID": package_id,
+            "copyrightText": "NOASSERTION",
+            "downloadLocation": dependency.get("download_location", "NOASSERTION"),
+            "filesAnalyzed": False,
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": "NOASSERTION",
+            "name": dependency["name"],
+            "supplier": "NOASSERTION",
+            "versionInfo": dependency["version"],
+        }
+        if "download_location" in dependency:
+            package["checksums"] = [
+                {"algorithm": "SHA256", "checksumValue": dependency["sha256"]}
+            ]
+        else:
+            package["externalRefs"] = [
+                {
+                    "referenceCategory": "PACKAGE-MANAGER",
+                    "referenceLocator": (
+                        f"pkg:pypi/{dependency['normalized_name']}@"
+                        f"{dependency['version']}"
+                    ),
+                    "referenceType": "purl",
+                }
+            ]
+        packages.append(package)
+        relationships.append(
+            {
+                "comment": (
+                    f"Optional dependency group {dependency['group']!r}; "
+                    f"wheel marker: {dependency['marker']}"
+                ),
+                "spdxElementId": package_id,
+                "relationshipType": "OPTIONAL_DEPENDENCY_OF",
+                "relatedSpdxElement": root_id,
+            }
+        )
+    document = {
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "creationInfo": {
+            "created": f"{release_date}T00:00:00Z",
+            "creators": [
+                "Organization: Fusion Technology Strategies",
+                "Tool: scripts/prepare_release_evidence.py",
+            ],
+        },
+        "dataLicense": "CC0-1.0",
+        "documentNamespace": (
+            f"{REPOSITORY_URL}/releases/tag/v{version}#spdx-{wheel_digest}"
+        ),
+        "name": f"{PROJECT_NAME}-{version}",
+        "packages": packages,
+        "relationships": relationships,
+        "spdxVersion": "SPDX-2.3",
+    }
+    return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
 def prepare_release_evidence(
     source_root: Path,
     dist_directory: Path,
@@ -333,6 +599,9 @@ def prepare_release_evidence(
     require(not output_directory.exists(), "Release evidence output already exists")
     require(output_directory.parent.is_dir(), "Release evidence parent must exist")
     version = validate_source_identity(source_root, tag)
+    release_date = read_release_date(source_root, version)
+    expected_dependencies = parse_optional_dependencies(source_root)
+    direct_wheel_dependencies = parse_direct_wheel_dependencies(source_root)
 
     expected_names = {
         f"{ARCHIVE_NAME}-{version}-py3-none-any.whl",
@@ -349,7 +618,10 @@ def prepare_release_evidence(
     )
     wheel = next(path for path in artifacts if path.suffix == ".whl")
     sdist = next(path for path in artifacts if path.name.endswith(".tar.gz"))
-    validate_wheel(wheel, version)
+    dependencies = [
+        *validate_wheel(wheel, version, expected_dependencies),
+        *direct_wheel_dependencies,
+    ]
     validate_sdist(sdist, version)
 
     records = [
@@ -360,6 +632,16 @@ def prepare_release_evidence(
         }
         for path in artifacts
     ]
+    output_directory.mkdir()
+    sbom_path = output_directory / f"{PROJECT_NAME}-{version}.spdx.json"
+    sbom_path.write_bytes(
+        build_spdx(version, release_date, sha256(wheel), dependencies)
+    )
+    sbom_record = {
+        "file": sbom_path.name,
+        "sha256": sha256(sbom_path),
+        "size": sbom_path.stat().st_size,
+    }
     evidence = {
         "schemaVersion": 1,
         "project": PROJECT_NAME,
@@ -367,14 +649,15 @@ def prepare_release_evidence(
         "tag": tag,
         "commit": commit,
         "artifacts": records,
+        "sbom": sbom_record,
     }
-    output_directory.mkdir()
     evidence_path = output_directory / "release-evidence.json"
     evidence_path.write_text(
         json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     manifest_records = [
         *records,
+        sbom_record,
         {"file": evidence_path.name, "sha256": sha256(evidence_path)},
     ]
     manifest = "".join(

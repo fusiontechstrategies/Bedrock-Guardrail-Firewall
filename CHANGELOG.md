@@ -19,6 +19,7 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 - Scheduled Semgrep and Trivy scans with native GitHub code-scanning uploads and retained SARIF evidence
 - Two-stage draft-release and trusted-PyPI publication workflows with immutable action pins and protected approval
 - Reproducible wheel and normalized source-distribution builds with SHA-256 evidence and provenance attestations
+- Deterministic SPDX 2.3 dependency SBOM covering the exact pinned optional package groups
 - Release validation for stable identity, metadata uniqueness, archive safety, wheel RECORD coverage, and non-overwrite behavior
 - Installed-wheel validation for both missing-model failure and full pinned Presidio initialization
 
@@ -37,7 +38,7 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 - Added defensive degraded-state handling when a required Presidio analyzer is unexpectedly unavailable
 - Expanded sanitized-demo evaluation containment across Python socket creation, connection, and name-resolution entry points
 - Redacted AWS request previews use a non-HTML marker while continuing to expose only length and digest metadata
-- Release workflows require an exact four-asset set, bind evidence to the checked-out commit, and reject non-portable archive names
+- Release workflows require an exact five-asset set, bind the SBOM and evidence to the checked-out commit, and reject non-portable archive names
 
 ## [4.0.0] - 2026-08-12
 

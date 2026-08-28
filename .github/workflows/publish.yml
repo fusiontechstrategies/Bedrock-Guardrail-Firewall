@@ -46,11 +46,12 @@ jobs:
           expected="$(printf '%s\n' \
             "bedrock_guardrail_firewall-${version}-py3-none-any.whl" \
             "bedrock_guardrail_firewall-${version}.tar.gz" \
+            "bedrock-guardrail-firewall-${version}.spdx.json" \
             "release-evidence.json" \
             "SHA256SUMS.txt" | sort)"
           actual="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort)"
           test "$expected" = "$actual" || {
-            echo "The published release asset set is not the approved four-file set." >&2
+            echo "The published release asset set is not the approved five-file set." >&2
             diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
             exit 1
           }
@@ -61,7 +62,7 @@ jobs:
           set -euo pipefail
           mkdir dist published-evidence
           gh release download "$RELEASE_TAG" --pattern '*.whl' --pattern '*.tar.gz' --dir dist
-          gh release download "$RELEASE_TAG" --pattern 'release-evidence.json' --pattern 'SHA256SUMS.txt' --dir published-evidence
+          gh release download "$RELEASE_TAG" --pattern '*.spdx.json' --pattern 'release-evidence.json' --pattern 'SHA256SUMS.txt' --dir published-evidence
 
       - name: Rebuild and compare integrity evidence
         shell: bash
@@ -74,6 +75,7 @@ jobs:
             --output-directory generated-evidence
           cmp --silent published-evidence/release-evidence.json generated-evidence/release-evidence.json
           cmp --silent published-evidence/SHA256SUMS.txt generated-evidence/SHA256SUMS.txt
+          cmp --silent published-evidence/*.spdx.json generated-evidence/*.spdx.json
 
       - name: Store the reverified distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
