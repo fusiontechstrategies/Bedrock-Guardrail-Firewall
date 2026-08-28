@@ -190,14 +190,14 @@ Read the [threat model](https://github.com/fusiontechstrategies/Bedrock-Guardrai
 
 ## Tested baseline
 
-- 177 automated tests across the core, AWS SDK contract, Presidio integration, and sanitized demo
+- 189 automated tests across the core, AWS SDK contract, Presidio integration, release validation, and sanitized demo
 - 86 percent branch-aware line coverage
 - 100 percent containment in the built-in 10-case adversarial suite
 - 100-round deterministic mutation test completed
-- All 177 tests passed in an isolated Python 3.12 environment with pinned AWS and Presidio integrations
+- All 189 tests passed in an isolated Python 3.12 environment with pinned AWS and Presidio integrations
 - Wheel and source-distribution build, metadata, clean-environment install, console entry point, packaged policy resources, and library import checks
 - Six-case sanitized adoption fixture with 100 percent expected decisions and high-risk containment
-- Native Windows validation for the 4.1.0 candidate completed on Python 3.10 through 3.14; the Windows and Linux hosted matrix remains a release gate
+- Native Windows validation for the 4.1.0 candidate completed on Python 3.10 through 3.14; the exact release-readiness tree also passed the complete hosted Windows and Linux matrix
 - Mocked Bedrock `INPUT` and `OUTPUT` calls, grounding qualifiers, anonymization, interventions, and failure paths
 - Audit-chain verification and tamper detection
 - Ruff formatting and lint checks
