@@ -125,7 +125,9 @@ The dependency groups are deliberately separated:
 | `requirements-dev.txt` | Testing, linting, static analysis, and dependency auditing |
 | `requirements-build.txt` | Pinned distribution build and validation tools |
 
-The project includes conventional wheel and source-distribution metadata plus the `bedrock-guardrail-firewall` console command. Unreleased source builds use `4.1.0.dev0` to identify development toward the next minor version; it is not a release number and must be replaced with an approved version during release preparation. No package is published by this repository automatically. Use only a registry release linked from this repository. After an official PyPI release is linked, the core installation command will be `python -m pip install bedrock-guardrail-firewall`.
+The project includes conventional wheel and source-distribution metadata plus the `bedrock-guardrail-firewall` console command. Distribution metadata identifies version 4.1.0. No package is published by this repository automatically. Use only a registry release linked from this repository. The core installation command for an official PyPI release is `python -m pip install bedrock-guardrail-firewall`. If the linked PyPI project does not list 4.1.0, use the source installation above rather than an unverified package with a similar name.
+
+Release candidates use exact version, archive, metadata, SHA-256, provenance, and trusted-publisher gates documented in [RELEASING.md](RELEASING.md). Manual candidate runs cannot publish. Publishing requires an approved GitHub release and approval through the protected `pypi` environment.
 
 ## AWS safety modes
 
@@ -195,7 +197,7 @@ Read the [threat model](https://github.com/fusiontechstrategies/Bedrock-Guardrai
 - All 177 tests passed in an isolated Python 3.12 environment with pinned AWS and Presidio integrations
 - Wheel and source-distribution build, metadata, clean-environment install, console entry point, packaged policy resources, and library import checks
 - Six-case sanitized adoption fixture with 100 percent expected decisions and high-risk containment
-- Native Windows validation for this unreleased branch completed on Python 3.12; its Windows and Linux CI matrix targets Python 3.10 through 3.14 and remains a release gate
+- Native Windows validation for the 4.1.0 candidate completed on Python 3.10 through 3.14; the Windows and Linux hosted matrix remains a release gate
 - Mocked Bedrock `INPUT` and `OUTPUT` calls, grounding qualifiers, anonymization, interventions, and failure paths
 - Audit-chain verification and tamper detection
 - Ruff formatting and lint checks

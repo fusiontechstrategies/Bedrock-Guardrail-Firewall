@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 PROJECT_NAME = "bedrock-guardrail-firewall"
-EXPECTED_VERSION = "4.1.0.dev0"
+EXPECTED_VERSION = "4.1.0"
 EXPECTED_REQUIRES_DIST = {
     'boto3==1.43.79; extra == "aws"',
     'botocore==1.43.79; extra == "aws"',
@@ -39,7 +39,7 @@ def validate_metadata() -> None:
     require(document["Name"] == PROJECT_NAME, "Unexpected distribution name")
     require(
         document["Version"] == EXPECTED_VERSION,
-        "Distribution version is not the expected development version",
+        "Distribution version is not the expected release version",
     )
     require(document["License-Expression"] == "Apache-2.0", "License mismatch")
     require(
@@ -138,9 +138,51 @@ def validate_missing_presidio_model(runtime, package_root) -> None:
         require(not name_resolution.called, "Network name resolution was attempted")
 
 
+def validate_presidio(runtime, package_root) -> None:
+    require(runtime.PRESIDIO_AVAILABLE, "Presidio extra is not installed")
+    require(
+        runtime.spacy.util.is_package("en_core_web_sm"),
+        "Pinned Presidio language model is not installed",
+    )
+    with tempfile.TemporaryDirectory(prefix="guardrail-package-presidio-") as directory:
+        config = make_config(
+            runtime,
+            package_root,
+            Path(directory),
+            profile_name="balanced",
+            presidio_mode="required",
+            presidio_model="en_core_web_sm",
+        )
+        system = runtime.BedrockGuardrailSystem(
+            config, privacy_key=b"installed-package-validation-key-0001"
+        )
+        report = system.doctor()
+        check = next(
+            item for item in report["checks"] if item["name"] == "presidio_engine"
+        )
+        require(report["ready"], "Installed Presidio package is not ready")
+        require(check["status"] == "pass", "Presidio engine did not initialize")
+        result = system.privacy.evaluate(
+            "Connect from documentation address 192.0.2.10.", "input"
+        )
+        finding = next(
+            (
+                item
+                for item in result.findings
+                if item.entity_type == "IP_ADDRESS" and item.recognizer == "presidio"
+            ),
+            None,
+        )
+        require(finding is not None, "Presidio did not detect the test IP address")
+        require(
+            "192.0.2.10" not in result.sanitized_text,
+            "Presidio finding was not irreversibly redacted",
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("core", "missing-presidio-model"))
+    parser.add_argument("mode", choices=("core", "missing-presidio-model", "presidio"))
     arguments = parser.parse_args()
 
     from bedrock_guardrail_firewall import orchestrator as runtime
@@ -149,8 +191,10 @@ def main() -> int:
     package_root = validate_resources()
     if arguments.mode == "core":
         validate_core(runtime, package_root)
-    else:
+    elif arguments.mode == "missing-presidio-model":
         validate_missing_presidio_model(runtime, package_root)
+    else:
+        validate_presidio(runtime, package_root)
     print(f"Installed package validation passed: {arguments.mode}")
     return 0
 

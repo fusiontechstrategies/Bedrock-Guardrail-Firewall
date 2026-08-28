@@ -1,0 +1,198 @@
+name: Release candidate
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Stable release tag that must match the checked-out source
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.event_name == 'push' && github.ref_name || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify release artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_COMMIT: ${{ github.sha }}
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'push' && github.ref_name || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+
+      - name: Install pinned build tools
+        run: python -m pip install --disable-pip-version-check -r requirements-build.txt
+
+      - name: Resolve the reproducible build epoch
+        id: build-epoch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          echo "value=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build distributions
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.build-epoch.outputs.value }}
+        run: python -m build
+
+      - name: Normalize the source distribution
+        run: >-
+          python scripts/normalize_sdist.py
+          --source-date-epoch "${{ steps.build-epoch.outputs.value }}"
+          dist/*.tar.gz
+
+      - name: Rebuild and compare distribution bytes
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.build-epoch.outputs.value }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m build --outdir reproducibility-dist
+          python scripts/normalize_sdist.py \
+            --source-date-epoch "${{ steps.build-epoch.outputs.value }}" \
+            reproducibility-dist/*.tar.gz
+          test "$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)" = \
+            "$(find reproducibility-dist -maxdepth 1 -type f -printf '%f\n' | sort)"
+          for artifact in dist/*; do
+            cmp --silent "$artifact" "reproducibility-dist/${artifact##*/}"
+          done
+
+      - name: Validate distribution metadata
+        run: python -m twine check dist/*
+
+      - name: Validate archives and write integrity evidence
+        run: >-
+          python scripts/prepare_release_evidence.py
+          --tag "$RELEASE_TAG"
+          --commit "$RELEASE_COMMIT"
+
+      - name: Store package distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Store release integrity evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-integrity-evidence
+          path: release-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  attest:
+    name: Attest release distributions
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download package distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-package-distributions
+          path: dist
+
+      - name: Create build provenance attestations
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+  draft-release:
+    name: Populate the draft GitHub release
+    if: github.event_name == 'push'
+    needs: [build, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Download package distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-package-distributions
+          path: release-assets
+
+      - name: Download release integrity evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-integrity-evidence
+          path: release-assets
+
+      - name: Create or verify the draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = "true" || {
+              echo "The release already exists and is not a draft." >&2
+              exit 1
+            }
+          else
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --verify-tag \
+              --title "Bedrock Guardrail Firewall ${RELEASE_TAG#v}" \
+              --notes "Release candidate. Review CHANGELOG.md, provenance, and every attached asset before publication."
+          fi
+
+      - name: Attach assets without replacing bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir remote-assets
+          for asset in release-assets/*; do
+            name="${asset##*/}"
+            if gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep -Fqx "$name"; then
+              gh release download "$RELEASE_TAG" --pattern "$name" --dir remote-assets
+              cmp --silent "$asset" "remote-assets/$name" || {
+                echo "Draft release asset differs: $name" >&2
+                exit 1
+              }
+              echo "Verified existing draft asset: $name"
+            else
+              gh release upload "$RELEASE_TAG" "$asset"
+            fi
+          done
+
+      - name: Reject unexpected draft release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          local_assets="$(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)"
+          remote_assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort)"
+          test "$local_assets" = "$remote_assets" || {
+            echo "The draft release asset set does not exactly match the verified candidate." >&2
+            diff -u <(printf '%s\n' "$local_assets") <(printf '%s\n' "$remote_assets") || true
+            exit 1
+          }

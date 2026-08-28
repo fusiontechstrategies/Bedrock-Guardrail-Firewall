@@ -8,19 +8,20 @@ This protects real workloads while still validating request construction, respon
 
 ## Completed local baseline
 
-The published source history identifies a 4.0.0 baseline. Packaging and adoption work under `Unreleased` uses `4.1.0.dev0` to identify development toward the next minor version until a release version is separately approved. The table records point-in-time local validation and must be refreshed for any release candidate.
+The published source history identifies a 4.0.0 baseline. Version 4.1.0 is the current release candidate. The table records point-in-time local validation and must be refreshed against the exact release commit and artifacts.
 
 | Check | Result |
 | --- | --- |
-| Automated unit and integration tests | 177 passed with all optional integrations installed on Python 3.12 |
+| Automated unit and integration tests | 189 discovered on Python 3.12; environment-specific optional checks are also run in dedicated jobs |
 | Branch-aware line coverage | 86 percent |
 | Built-in self-test | 7 of 7 passed |
 | Built-in adversarial suite | 10 of 10 contained |
 | Deterministic mutation suite | 100 rounds completed |
-| Native Windows Python 3.12 | All 177 passed in the isolated pinned AWS and Presidio environment |
-| Windows and Linux Python 3.10 through 3.14 | Configured as a required CI matrix; the unreleased branch must pass it before release |
+| Native Windows Python 3.12 | All 189 passed in the isolated pinned AWS and Presidio environment |
+| Windows and Linux Python 3.10 through 3.14 | Configured as a required CI matrix; the exact release commit must pass it before publication |
 | Missing Presidio model package check | Readiness failed before provider construction, download, socket creation, connection, or name resolution |
-| Package validation | Wheel and source distribution built; metadata, isolated install, library import, console entry point, packaged policies, and default local state passed |
+| Package validation | Wheel and source distribution built; metadata, isolated install, library import, console entry point, packaged policies, default local state, missing-model failure, and full pinned Presidio initialization passed |
+| Release integrity | Repeat builds produced identical wheel and normalized source-distribution bytes; stable identity, archive safety, wheel RECORD, SHA-256 evidence, and non-overwrite checks passed |
 | Sanitized adoption fixture | 6 of 6 expected decisions and 4 of 4 high-risk containment cases passed with zero evaluation-time Python socket attempts and zero serialized high-risk values |
 | Python compilation | Passed |
 | Ruff formatting | Passed |
@@ -184,7 +185,7 @@ GitHub Actions is configured to run:
 - Python 3.10, 3.11, 3.12, 3.13, and 3.14
 - Pinned AWS SDK contract validation
 - Pinned Presidio engine and redaction validation
-- Wheel and source-distribution build plus isolated installed-CLI validation
+- Wheel and source-distribution build plus isolated installed-CLI and Presidio validation
 - Deterministic sanitized adoption fixture
 - Formatting and lint checks
 - Static-security analysis

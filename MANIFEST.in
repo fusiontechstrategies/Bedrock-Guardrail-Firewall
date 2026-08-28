@@ -6,6 +6,7 @@ include LICENSE
 include NOTICE
 include QUICK_REFERENCE.md
 include README.md
+include RELEASING.md
 include SECURITY.md
 include SUPPORT.md
 include guardrail_policy.json
