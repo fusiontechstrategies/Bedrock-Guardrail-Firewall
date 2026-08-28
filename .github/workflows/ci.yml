@@ -125,7 +125,7 @@ jobs:
           "${RUNNER_TEMP}/package-smoke/bin/python" -m pip install --disable-pip-version-check --no-deps "${WHEEL_PATH}"
           "${RUNNER_TEMP}/package-smoke/bin/python" -m pip check
           cd "${RUNNER_TEMP}"
-          test "$("${RUNNER_TEMP}/package-smoke/bin/bedrock-guardrail-firewall" --version)" = "bedrock-guardrail-firewall 4.1.0.dev0"
+          test "$("${RUNNER_TEMP}/package-smoke/bin/bedrock-guardrail-firewall" --version)" = "bedrock-guardrail-firewall 4.1.0"
           "${RUNNER_TEMP}/package-smoke/bin/python" "${GITHUB_WORKSPACE}/scripts/validate_installed_package.py" core
           "${RUNNER_TEMP}/package-smoke/bin/bedrock-guardrail-firewall" --presidio-mode disabled doctor
           test -f "${RUNNER_TEMP}/.guardrail-data/privacy.key"
@@ -135,6 +135,9 @@ jobs:
           "${RUNNER_TEMP}/package-presidio-smoke/bin/python" -m pip install --disable-pip-version-check "${WHEEL_PATH}[presidio]"
           "${RUNNER_TEMP}/package-presidio-smoke/bin/python" -m pip check
           "${RUNNER_TEMP}/package-presidio-smoke/bin/python" "${GITHUB_WORKSPACE}/scripts/validate_installed_package.py" missing-presidio-model
+          "${RUNNER_TEMP}/package-presidio-smoke/bin/python" -m pip install --disable-pip-version-check -r "${GITHUB_WORKSPACE}/requirements-presidio.txt"
+          "${RUNNER_TEMP}/package-presidio-smoke/bin/python" -m pip check
+          "${RUNNER_TEMP}/package-presidio-smoke/bin/python" "${GITHUB_WORKSPACE}/scripts/validate_installed_package.py" presidio
 
   aws-sdk-contract:
     name: AWS SDK contract Python ${{ matrix.python-version }}

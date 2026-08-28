@@ -41,6 +41,8 @@ python orchestrator.py --presidio-mode disabled red-team
 python examples/run_sanitized_demo.py
 python -m build
 python -m twine check dist/*
+$commit = git rev-parse HEAD
+python scripts/prepare_release_evidence.py --tag vX.Y.Z --commit $commit
 bandit -c pyproject.toml -r orchestrator.py
 pip-audit -r requirements-aws.txt
 pip-audit -r requirements-presidio.txt
@@ -49,6 +51,8 @@ pip-audit -r requirements-build.txt
 ```
 
 No test or pull request should require live AWS credentials. Use injected clients and synthetic responses for AWS integration behavior.
+
+Release publication has additional identity, archive, integrity-evidence, provenance, and trusted-publisher gates in `RELEASING.md`.
 
 ## Pull requests
 

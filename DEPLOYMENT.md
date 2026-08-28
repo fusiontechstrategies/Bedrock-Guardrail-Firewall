@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This guide covers safe local use, optional Microsoft Presidio installation, authorized Amazon Bedrock Guardrails integration, and AWS Lambda deployment for the current source tree. Unreleased distribution builds use `4.1.0.dev0` to identify development toward the next minor version, not as a release version.
+This guide covers safe local use, optional Microsoft Presidio installation, authorized Amazon Bedrock Guardrails integration, and AWS Lambda deployment for version 4.1.0. Verify a distribution against an official release linked from this repository before deployment.
 
 The runtime does not invoke a foundation model. It evaluates supplied input and optional candidate output, then returns a security decision and sanitized content.
 
