@@ -135,7 +135,7 @@ jobs:
           "${RUNNER_TEMP}/package-presidio-smoke/bin/python" -m pip install --disable-pip-version-check "${WHEEL_PATH}[presidio]"
           "${RUNNER_TEMP}/package-presidio-smoke/bin/python" -m pip check
           "${RUNNER_TEMP}/package-presidio-smoke/bin/python" "${GITHUB_WORKSPACE}/scripts/validate_installed_package.py" missing-presidio-model
-          "${RUNNER_TEMP}/package-presidio-smoke/bin/python" -m pip install --disable-pip-version-check -r requirements-presidio.txt
+          "${RUNNER_TEMP}/package-presidio-smoke/bin/python" -m pip install --disable-pip-version-check -r "${GITHUB_WORKSPACE}/requirements-presidio.txt"
           "${RUNNER_TEMP}/package-presidio-smoke/bin/python" -m pip check
           "${RUNNER_TEMP}/package-presidio-smoke/bin/python" "${GITHUB_WORKSPACE}/scripts/validate_installed_package.py" presidio
 
