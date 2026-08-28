@@ -11,102 +11,40 @@ on:
 
 permissions:
   contents: read
-  security-events: write
-
-concurrency:
-  group: security-scanners-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 jobs:
-  semgrep:
-    name: Semgrep security analysis
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    container:
-      image: semgrep/semgrep@sha256:b94b53d02fd4a022f9eac4e2af1380f5c3c4c21400e79d3336bdff1d1db5e796 # v1.175.0
-    steps:
-      - name: Check out reviewed source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Scan for security and correctness defects
-        id: semgrep-scan
-        continue-on-error: true
-        # The package declares and tests Python 3.10 or newer, so the Python 3.7
-        # compatibility rule is inapplicable to this repository.
-        run: >-
-          semgrep scan --config auto --error --jobs 2 --max-memory 4000 --timeout 10
-          --exclude-rule python.lang.compatibility.python37.python37-compatibility-importlib2
-          --sarif-output semgrep-results.sarif .
-      - name: Upload Semgrep results to code scanning
-        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
-        with:
-          sarif_file: semgrep-results.sarif
-          category: semgrep
-      - name: Preserve Semgrep results
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: semgrep-results-${{ github.sha }}
-          path: semgrep-results.sarif
-          if-no-files-found: error
-          retention-days: 90
-      - name: Enforce Semgrep result
-        if: steps.semgrep-scan.outcome == 'failure'
-        run: exit 1
+  security:
+    name: Security
+    permissions:
+      contents: read
+      security-events: write
+    uses: fusiontechstrategies/FusionTechStrategies/.github/workflows/reusable-security.yml@f64c8eb98fa6c907e013d158089ea6ab38e91ad7
+    with:
+      semgrep_config: auto
+      # The package declares and tests Python 3.10 or newer, so the Python 3.7
+      # compatibility rule is inapplicable to this repository.
+      semgrep_exclude_rules: python.lang.compatibility.python37.python37-compatibility-importlib2
 
-  trivy:
-    name: Trivy source and configuration scan
+  gitleaks-compatibility:
+    name: Gitleaks
+    if: always()
+    needs: security
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 2
     steps:
-      - name: Check out reviewed source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Scan source, configuration, secrets, and dependency files
-        id: trivy-scan
-        continue-on-error: true
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,secret,misconfig
-          severity: CRITICAL,HIGH
-          ignore-unfixed: false
-          exit-code: 1
-          format: sarif
-          output: trivy-results.sarif
-      - name: Upload Trivy results to code scanning
-        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
-        with:
-          sarif_file: trivy-results.sarif
-          category: trivy
-      - name: Preserve Trivy results
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: trivy-results-${{ github.sha }}
-          path: trivy-results.sarif
-          if-no-files-found: error
-          retention-days: 90
-      - name: Enforce Trivy result
-        if: steps.trivy-scan.outcome == 'failure'
-        run: exit 1
+      - name: Preserve the protected Gitleaks contract
+        env:
+          SECURITY_RESULT: ${{ needs.security.result }}
+        run: test "$SECURITY_RESULT" = "success"
 
   required:
     name: Security scanners
     if: always()
-    needs: [semgrep, trivy]
+    needs: security
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Confirm scanner jobs succeeded
+      - name: Preserve the protected scanner contract
         env:
-          SEMGREP_RESULT: ${{ needs.semgrep.result }}
-          TRIVY_RESULT: ${{ needs.trivy.result }}
-        run: |
-          test "$SEMGREP_RESULT" = "success"
-          test "$TRIVY_RESULT" = "success"
+          SECURITY_RESULT: ${{ needs.security.result }}
+        run: test "$SECURITY_RESULT" = "success"
