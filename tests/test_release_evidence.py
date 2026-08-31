@@ -22,8 +22,8 @@ Requires-Python: >=3.10
 License-Expression: Apache-2.0
 Description-Content-Type: text/markdown
 Provides-Extra: aws
-Requires-Dist: boto3==1.43.79; extra == "aws"
-Requires-Dist: botocore==1.43.79; extra == "aws"
+Requires-Dist: boto3==1.43.82; extra == "aws"
+Requires-Dist: botocore==1.43.82; extra == "aws"
 Provides-Extra: presidio
 """
     'Requires-Dist: presidio-analyzer==2.2.364; python_version < "3.14" '
@@ -54,7 +54,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             encoding="utf-8",
         )
         (root / "requirements-aws.txt").write_text(
-            "boto3==1.43.79\nbotocore==1.43.79\n", encoding="utf-8"
+            "boto3==1.43.82\nbotocore==1.43.82\n", encoding="utf-8"
         )
         (root / "requirements-presidio.txt").write_text(
             "presidio-analyzer==2.2.364\nspacy==3.8.16\n"
@@ -157,7 +157,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             root = Path(directory)
             self.make_source(root)
             (root / "requirements-aws.txt").write_text(
-                "boto3>=1.43.79\n", encoding="utf-8"
+                "boto3>=1.43.82\n", encoding="utf-8"
             )
             with self.assertRaisesRegex(
                 release.ReleaseEvidenceError, "not an exact package pin"
@@ -201,7 +201,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             root = Path(directory)
             self.make_source(root)
             (root / "requirements-aws.txt").write_text(
-                "boto3==1.43.78\nbotocore==1.43.79\n", encoding="utf-8"
+                "boto3==1.43.81\nbotocore==1.43.82\n", encoding="utf-8"
             )
             dist = root / "dist"
             self.make_distributions(dist)
