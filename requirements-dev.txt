@@ -1,6 +1,6 @@
 bandit==1.9.4
 build==1.6.1
-coverage==7.16.0
+coverage==7.16.1
 pip-audit==2.10.1
-ruff==0.16.7
+ruff==0.16.8
 twine==7.0.0
