@@ -16,6 +16,8 @@ Bedrock Guardrail Firewall is a privacy-first enforcement layer for generative A
 
 The production runtime remains a single Python file: `orchestrator.py`. Policy, documentation, tests, and repository automation are kept separate so the runtime stays portable and auditable.
 
+[![Bedrock Guardrail Firewall local-first decision flow](docs/images/bedrock-local-first-decision.png)](docs/images/source/bedrock-local-first-decision.svg)
+
 ## Try it offline in 60 seconds
 
 Prerequisites: Git and Python 3.10 or newer. These commands install the standard-library-only core, create no AWS client, and require no credentials.
