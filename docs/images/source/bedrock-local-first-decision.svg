@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Bedrock Guardrail Firewall local-first decision flow</title>
+  <desc id="desc">A synthetic email address is detected and sanitized locally before any optional cloud guardrail call, followed by a strongest-action decision and metadata-only evidence.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#07172a"/><stop offset="1" stop-color="#162942"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#020817" flood-opacity=".42"/></filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#66d9ff"/></marker>
+  </defs>
+  <rect width="1200" height="760" fill="url(#bg)"/>
+  <circle cx="1090" cy="15" r="220" fill="#243f5c" opacity=".55"/>
+  <text x="70" y="67" fill="#66d9ff" font-family="Segoe UI,Arial,sans-serif" font-size="18" font-weight="700" letter-spacing="3">BEDROCK GUARDRAIL FIREWALL</text>
+  <text x="70" y="120" fill="#fff" font-family="Segoe UI,Arial,sans-serif" font-size="42" font-weight="750">Sensitive text stays local by default.</text>
+  <text x="70" y="158" fill="#bdd8eb" font-family="Segoe UI,Arial,sans-serif" font-size="20">A synthetic request through privacy, policy, and an enforceable decision</text>
+  <g filter="url(#shadow)" font-family="Segoe UI,Arial,sans-serif">
+    <rect x="70" y="205" width="1060" height="90" rx="18" fill="#152e48" stroke="#477e9f" stroke-width="2"/>
+    <text x="100" y="238" fill="#66d9ff" font-size="14" font-weight="700" letter-spacing="1.4">SYNTHETIC INPUT</text>
+    <text x="100" y="271" fill="#fff" font-size="22" font-weight="650">Contact analyst@example.invalid for the approved report.</text>
+    <rect x="890" y="226" width="210" height="44" rx="22" fill="#412936" stroke="#ff7891"/>
+    <text x="995" y="253" text-anchor="middle" fill="#ff9bab" font-size="14" font-weight="700">EMAIL DETECTED</text>
+  </g>
+  <g filter="url(#shadow)" font-family="Segoe UI,Arial,sans-serif">
+    <rect x="70" y="344" width="300" height="206" rx="20" fill="#153340" stroke="#35ad91" stroke-width="2"/>
+    <text x="100" y="380" fill="#6ff0cb" font-size="14" font-weight="700" letter-spacing="1.3">1  LOCAL PRIVACY</text>
+    <text x="100" y="421" fill="#fff" font-size="24" font-weight="700">Redact first</text>
+    <text x="100" y="457" fill="#c2e8de" font-size="16">Sensitive value becomes</text>
+    <text x="100" y="486" fill="#7df1cf" font-size="16" font-weight="700">[EMAIL_ADDRESS_REDACTED]</text>
+    <text x="100" y="520" fill="#a7cfc5" font-size="14">No AWS client is created offline.</text>
+
+    <rect x="450" y="344" width="300" height="206" rx="20" fill="#252d3d" stroke="#9979d7" stroke-width="2"/>
+    <text x="480" y="380" fill="#bca4ff" font-size="14" font-weight="700" letter-spacing="1.3">2  LOCAL CONTROLS</text>
+    <text x="480" y="421" fill="#fff" font-size="24" font-weight="700">Apply policy</text>
+    <text x="480" y="457" fill="#d7cdef" font-size="16">Prompt attacks, authorization,</text>
+    <text x="480" y="486" fill="#d7cdef" font-size="16">grounding, and capability limits</text>
+    <text x="480" y="520" fill="#a99bc7" font-size="14">The strongest control wins.</text>
+
+    <rect x="830" y="344" width="300" height="206" rx="20" fill="#303026" stroke="#c99a32" stroke-width="2"/>
+    <text x="860" y="380" fill="#ffd36d" font-size="14" font-weight="700" letter-spacing="1.3">3  OPTIONAL CLOUD</text>
+    <text x="860" y="421" fill="#fff" font-size="21" font-weight="700">Transmit only if allowed</text>
+    <text x="860" y="457" fill="#eadcb9" font-size="16">Preview makes no AWS call.</text>
+    <text x="860" y="486" fill="#eadcb9" font-size="16">Live mode requires two gates.</text>
+    <text x="860" y="520" fill="#baa978" font-size="14">Local block means no transmission.</text>
+  </g>
+  <path d="M370 447 H435" stroke="#66d9ff" stroke-width="4" marker-end="url(#arrow)"/><path d="M750 447 H815" stroke="#66d9ff" stroke-width="4" marker-end="url(#arrow)"/>
+  <g filter="url(#shadow)" font-family="Segoe UI,Arial,sans-serif">
+    <rect x="70" y="600" width="1060" height="103" rx="20" fill="#11283a" stroke="#41b99b" stroke-width="2"/>
+    <text x="100" y="633" fill="#71edcc" font-size="14" font-weight="700" letter-spacing="1.3">DECISION</text>
+    <text x="100" y="670" fill="#fff" font-size="27" font-weight="700">sanitize  |  content released  |  metadata-only evidence</text>
+    <rect x="870" y="625" width="230" height="48" rx="14" fill="#123b34" stroke="#57d2b0"/>
+    <text x="985" y="655" text-anchor="middle" fill="#87f4d6" font-size="14" font-weight="700">NO RAW PROMPT LOGGING</text>
+  </g>
+  <text x="70" y="738" fill="#7ea6c0" font-family="Segoe UI,Arial,sans-serif" font-size="13">SYNTHETIC OFFLINE EXAMPLE  |  Optional services require trusted deployment configuration and explicit authorization.</text>
+</svg>
