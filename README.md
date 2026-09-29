@@ -127,7 +127,7 @@ The dependency groups are deliberately separated:
 | `requirements-dev.txt` | Testing, linting, static analysis, and dependency auditing |
 | `requirements-build.txt` | Pinned distribution build and validation tools |
 
-The project includes conventional wheel and source-distribution metadata plus the `bedrock-guardrail-firewall` console command. Distribution metadata identifies version 4.1.0. No package is published by this repository automatically. Use only a registry release linked from this repository. The core installation command for an official PyPI release is `python -m pip install bedrock-guardrail-firewall`. If the linked PyPI project does not list 4.1.0, use the source installation above rather than an unverified package with a similar name.
+Version 4.1.0 is published on [PyPI](https://pypi.org/project/bedrock-guardrail-firewall/4.1.0/) with a wheel, source distribution, and the `bedrock-guardrail-firewall` console command. Install this exact release with `python -m pip install bedrock-guardrail-firewall==4.1.0`. For a first offline check, run `bedrock-guardrail-firewall --presidio-mode disabled doctor`. The [GitHub release](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/releases/tag/v4.1.0) provides the matching SHA-256 checksums, SPDX 2.3 SBOM, and release evidence. Use the source installation above if you need an unpublished revision.
 
 Release candidates use exact version, archive, metadata, SPDX 2.3 dependency SBOM, SHA-256, provenance, and trusted-publisher gates documented in [RELEASING.md](RELEASING.md). Manual candidate runs cannot publish. Publishing requires an approved GitHub release and approval through the protected `pypi` environment.
 
