@@ -6,6 +6,12 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 
 ## [Unreleased]
 
+## [4.1.1] - 2026-09-29
+
+### Changed
+
+- Removed the unsupported Beta development-status classifier from the installable package metadata. This is a metadata correction; runtime behavior is unchanged from 4.1.0.
+
 ## [4.1.0] - 2026-08-27
 
 ### Added
@@ -97,6 +103,7 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 - Added public-response filtering for local and cloud resource details
 - Added blocked-content suppression and request-identifier pseudonymization in stored evidence
 
-[Unreleased]: https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/compare/v4.1.0...HEAD
+[Unreleased]: https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/compare/v4.1.1...HEAD
+[4.1.1]: https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/compare/v4.1.0...v4.1.1
 [4.1.0]: https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/compare/e19e426522a4b9975cc9e37b8b9b68e91dd7344b...v4.1.0
 [4.0.0]: https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/commit/e19e426522a4b9975cc9e37b8b9b68e91dd7344b

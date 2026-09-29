@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This guide covers safe local use, optional Microsoft Presidio installation, authorized Amazon Bedrock Guardrails integration, and AWS Lambda deployment for version 4.1.0. Verify a distribution against an official release linked from this repository before deployment.
+This guide covers safe local use, optional Microsoft Presidio installation, authorized Amazon Bedrock Guardrails integration, and AWS Lambda deployment for version 4.1.1. Verify a distribution against an official release linked from this repository before deployment.
 
 The runtime does not invoke a foundation model. It evaluates supplied input and optional candidate output, then returns a security decision and sanitized content.
 
