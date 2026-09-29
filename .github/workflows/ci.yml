@@ -125,7 +125,7 @@ jobs:
           "${RUNNER_TEMP}/package-smoke/bin/python" -m pip install --disable-pip-version-check --no-deps "${WHEEL_PATH}"
           "${RUNNER_TEMP}/package-smoke/bin/python" -m pip check
           cd "${RUNNER_TEMP}"
-          test "$("${RUNNER_TEMP}/package-smoke/bin/bedrock-guardrail-firewall" --version)" = "bedrock-guardrail-firewall 4.1.0"
+          test "$("${RUNNER_TEMP}/package-smoke/bin/bedrock-guardrail-firewall" --version)" = "bedrock-guardrail-firewall 4.1.1"
           "${RUNNER_TEMP}/package-smoke/bin/python" "${GITHUB_WORKSPACE}/scripts/validate_installed_package.py" core
           "${RUNNER_TEMP}/package-smoke/bin/bedrock-guardrail-firewall" --presidio-mode disabled doctor
           test -f "${RUNNER_TEMP}/.guardrail-data/privacy.key"

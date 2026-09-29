@@ -8,7 +8,7 @@ This protects real workloads while still validating request construction, respon
 
 ## Completed local baseline
 
-The published source history identifies a 4.0.0 baseline. Version 4.1.0 is the current release candidate. The table records point-in-time local validation and must be refreshed against the exact release commit and artifacts.
+The published source history identifies a 4.0.0 baseline. Version 4.1.0 is published; 4.1.1 is a metadata-correction release candidate. The table records point-in-time local validation and must be refreshed against the exact release commit and artifacts.
 
 | Check | Result |
 | --- | --- |
