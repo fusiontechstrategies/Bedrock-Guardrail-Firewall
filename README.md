@@ -18,6 +18,8 @@ The production runtime remains a single Python file: `orchestrator.py`. Policy, 
 
 [![Bedrock Guardrail Firewall local-first decision flow](docs/images/bedrock-local-first-decision.png)](docs/images/source/bedrock-local-first-decision.svg)
 
+For a walkthrough of the local privacy checks, optional Bedrock Guardrails call, and fail-closed boundaries, read the [AWS Builder Center article](https://builder.aws.com/content/3K0E850DN4AxRUwQMYgxGLwuPK0/put-local-privacy-checks-before-optional-bedrock-guardrails-calls).
+
 ## Try it offline in 60 seconds
 
 Prerequisites: Git and Python 3.10 or newer. These commands install the standard-library-only core, create no AWS client, and require no credentials.
