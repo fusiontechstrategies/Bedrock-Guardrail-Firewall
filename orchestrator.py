@@ -2580,6 +2580,17 @@ class BedrockGuardrailAdapter:
         ):
             raise ExternalServiceError("Invalid automated reasoning payload")
 
+        def proof_text(value: Any) -> bool:
+            if not isinstance(value, str):
+                return False
+            try:
+                canonical = validate_text(value, "reasoning proof", 1000, required=True)
+            except InputValidationError:
+                return False
+            return any(
+                unicodedata.category(character)[0] in "LNPS" for character in canonical
+            )
+
         def statements(value: Any) -> bool:
             return (
                 isinstance(value, list)
@@ -2588,12 +2599,7 @@ class BedrockGuardrailAdapter:
                     isinstance(item, dict)
                     and bool(item)
                     and not set(item) - {"logic", "naturalLanguage"}
-                    and all(
-                        isinstance(text, str)
-                        and bool(text.strip())
-                        and len(text) <= 1000
-                        for text in item.values()
-                    )
+                    and all(proof_text(text) for text in item.values())
                     for item in value
                 )
             )
@@ -2609,7 +2615,7 @@ class BedrockGuardrailAdapter:
                     or not isinstance(rule["policyVersionArn"], str)
                     or len(rule["policyVersionArn"]) > 2048
                     or not re.fullmatch(
-                        r"arn:aws(?:-[^:]+)?:bedrock:[a-z0-9-]{1,20}:[0-9]{12}:automated-reasoning-policy/[a-z0-9]{12}(?::[1-9][0-9]{0,11})?",
+                        r"arn:aws(?:-[a-z0-9-]{1,32})?:bedrock:[a-z0-9-]{1,20}:[0-9]{12}:automated-reasoning-policy/[a-z0-9]{12}(?::[1-9][0-9]{0,11})?",
                         rule["policyVersionArn"],
                     )
                     for rule in payload[key]

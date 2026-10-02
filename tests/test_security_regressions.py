@@ -656,6 +656,33 @@ class SecurityRegressionTests(GuardrailTestCase):
         for patch_data in (
             {"translation": {"claims": [{"logic": ""}]}},
             {"claimsTrueScenario": {"statements": [{"naturalLanguage": " "}]}},
+            *(
+                {"translation": {"claims": [{"logic": value}]}}
+                for value in (
+                    "\u200b",
+                    "\ufeff",
+                    "\u2065",
+                    "\u202e",
+                    "\x00",
+                    "\ud800",
+                    "\u0600",
+                    "\u0301",
+                )
+            ),
+            *(
+                {
+                    "supportingRules": [
+                        {
+                            "identifier": "abcdefghijkl",
+                            "policyVersionArn": (
+                                f"arn:aws-{partition}:bedrock:us-east-1:123456789012:"
+                                "automated-reasoning-policy/abcdefghijkl:1"
+                            ),
+                        }
+                    ]
+                }
+                for partition in ("\n", "gov us", "gov/us")
+            ),
             {"logicWarning": {}},
             {"logicWarning": {"type": "ALWAYS_TRUE"}},
             {"supportingRules": ["bad-rule"]},
