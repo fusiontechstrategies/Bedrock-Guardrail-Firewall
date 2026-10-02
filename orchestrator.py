@@ -480,7 +480,7 @@ class CrossProcessFileLock:
                 self._handle = None
 
 
-def _atomic_json_write(path: Path, value: Any) -> None:
+def _atomic_json_write(path: Path, value: Any, *, create_only: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
@@ -495,8 +495,11 @@ def _atomic_json_write(path: Path, value: Any) -> None:
             os.fsync(handle.fileno())
         with contextlib.suppress(OSError):
             temp_path.chmod(0o600)
-        os.replace(temp_path, path)
-        temp_path = None
+        if create_only:
+            os.link(temp_path, path)
+        else:
+            os.replace(temp_path, path)
+            temp_path = None
     except OSError as exc:
         raise StorageError(f"Unable to update {path.name}") from exc
     finally:
@@ -1512,6 +1515,7 @@ class PrivacyEngine:
         return f"[{safe_label}_REDACTED]"
 
     def evaluate(self, text: str, field_name: str) -> PrivacyResult:
+        text = _normalize_for_detection(text)
         findings = self._regex_findings(text)
         if self.config.presidio_mode != "disabled":
             findings.extend(self._presidio_findings(text))
@@ -1782,7 +1786,7 @@ class AuthorizationEngine:
         capability = str(context.get("requested_capability", "retrieval"))
         role = str(context.get("role", "user"))
         allowed_roles = self.bundle.capability_roles.get(capability)
-        if allowed_roles is not None and role not in allowed_roles:
+        if allowed_roles is None or role not in allowed_roles:
             findings.append(
                 Detection(
                     detector="authorization",
@@ -2606,12 +2610,9 @@ class ReviewStore:
 
     def create(self, payload: Mapping[str, Any], level: str) -> dict[str, Any]:
         self.local_dir.mkdir(parents=True, exist_ok=True)
-        correlation_value = str(
-            payload.get("request_id_hash") or payload.get("request_id") or "anonymous"
-        )
-        file_id = _sha256_text(correlation_value)[:32]
+        file_id = uuid.uuid4().hex
         local_path = self.local_dir / f"review_{file_id}.json"
-        _atomic_json_write(local_path, payload)
+        _atomic_json_write(local_path, payload, create_only=True)
         queue_url = {
             "l1": self.config.review_queue_l1,
             "l2": self.config.review_queue_l2,
@@ -2655,12 +2656,9 @@ class IncidentStore:
 
     def create(self, payload: Mapping[str, Any]) -> str:
         self.local_dir.mkdir(parents=True, exist_ok=True)
-        correlation_value = str(
-            payload.get("request_id_hash") or payload.get("request_id") or "anonymous"
-        )
-        file_id = _sha256_text(correlation_value)[:32]
+        file_id = uuid.uuid4().hex
         path = self.local_dir / f"incident_{file_id}.json"
-        _atomic_json_write(path, payload)
+        _atomic_json_write(path, payload, create_only=True)
         return str(path)
 
 
@@ -2954,7 +2952,7 @@ class BedrockGuardrailSystem:
     ) -> dict[str, bool]:
         role = str(context.get("role", "user"))
         permissions = {
-            "retrieval": True,
+            "retrieval": role in self.bundle.capability_roles.get("retrieval", []),
             "write": role in self.bundle.capability_roles.get("write", []),
             "external_api": role
             in self.bundle.capability_roles.get("external_api", []),
@@ -3161,6 +3159,19 @@ class BedrockGuardrailSystem:
             )
             aws_input_action = aws_input.action
             ctx.detections.extend(aws_input.detections)
+            if aws_input.action != GuardrailAction.ALLOW and not any(
+                item.action == aws_input.action for item in aws_input.detections
+            ):
+                ctx.detections.append(
+                    Detection(
+                        detector="aws_guardrail",
+                        category="service_action",
+                        field="input",
+                        action=aws_input.action,
+                        severity="high",
+                        confidence=1.0,
+                    )
+                )
             ctx.diagnostics.append(f"aws_input:{aws_input.status}")
             if aws_input.sanitized_text is not None:
                 rechecked_privacy = self.privacy.evaluate(
@@ -3190,6 +3201,19 @@ class BedrockGuardrailSystem:
                     contexts=sanitized_retrieval_contexts,
                 )
                 ctx.detections.extend(aws_output.detections)
+                if aws_output.action != GuardrailAction.ALLOW and not any(
+                    item.action == aws_output.action for item in aws_output.detections
+                ):
+                    ctx.detections.append(
+                        Detection(
+                            detector="aws_guardrail",
+                            category="service_action",
+                            field="output",
+                            action=aws_output.action,
+                            severity="high",
+                            confidence=1.0,
+                        )
+                    )
                 ctx.diagnostics.append(f"aws_output:{aws_output.status}")
                 if aws_output.sanitized_text is not None:
                     rechecked_privacy = self.privacy.evaluate(
