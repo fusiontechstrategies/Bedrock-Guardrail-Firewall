@@ -886,9 +886,10 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
             return True
 
         optional_count = 0
+        alternative_budget = 1
 
         def walk(nodes, pending=None):
-            nonlocal optional_count
+            nonlocal optional_count, alternative_budget
             pending = list(pending or [])
             for op, value in nodes:
                 if str(op) in {"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}:
@@ -915,6 +916,11 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
                         # exponential even though no individual repeat exceeds 1.
                         if minimum == 0:
                             optional_count += 1
+                            alternative_budget *= 2
+                            if alternative_budget > 256:
+                                raise ConfigurationError(
+                                    f"{field_name} has too many alternative paths"
+                                )
                             if optional_count > 8:
                                 raise ConfigurationError(
                                     f"{field_name} has too many optional repeats"
@@ -940,6 +946,11 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
                 elif op == _parser.SUBPATTERN:
                     pending = walk(value[-1], pending)
                 elif op == _parser.BRANCH:
+                    alternative_budget *= len(value[1])
+                    if alternative_budget > 256:
+                        raise ConfigurationError(
+                            f"{field_name} has too many alternative paths"
+                        )
                     pending = [
                         atom for branch in value[1] for atom in walk(branch, pending)
                     ]

@@ -42,6 +42,7 @@ class SecurityRegressionTests(GuardrailTestCase):
             r"(?=a+a+$)",
             "a?" * 24 + "a{24}$",
             "[aA]{0,1}" * 8 + "a{8}$",
+            "(?:a|)" * 24 + "a{24}b$",
         ):
             with (
                 self.subTest(pattern=pattern),
