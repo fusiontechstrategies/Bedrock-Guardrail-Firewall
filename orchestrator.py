@@ -836,30 +836,93 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
         except ImportError:  # Python 3.10 keeps the parser in its legacy module.
             import sre_parse as _parser
 
-        def walk(nodes):
+        def matches_literal(atom, codepoint):
+            op, value = atom
+            character = chr(codepoint)
+            if op == _parser.LITERAL:
+                return chr(value).casefold() == character.casefold()
+            if op == _parser.NOT_LITERAL:
+                return chr(value).casefold() != character.casefold()
+            if op == _parser.ANY:
+                return True
+            if op == _parser.IN:
+                if any(item[0] == _parser.NEGATE for item in value):
+                    return True
+                return any(matches_literal(item, codepoint) for item in value)
+            if op == _parser.RANGE:
+                return any(
+                    len(form) == 1 and value[0] <= ord(form) <= value[1]
+                    for form in (character, character.lower(), character.upper())
+                )
+            if op == _parser.CATEGORY:
+                category = str(value)
+                if category == "CATEGORY_SPACE":
+                    return character.isspace()
+                if category == "CATEGORY_DIGIT":
+                    return character.isdecimal()
+                if category == "CATEGORY_WORD":
+                    return character.isalnum() or character == "_"
+            return True
+
+        def finite_literals(atom):
+            op, value = atom
+            if op == _parser.LITERAL:
+                return {value}
+            if op == _parser.RANGE and value[1] - value[0] <= 256:
+                return set(range(value[0], value[1] + 1))
+            if op == _parser.IN:
+                values = [finite_literals(item) for item in value]
+                if all(item is not None for item in values):
+                    return set().union(*values)
+            return None
+
+        def overlaps(left, right):
+            right_values = finite_literals(right)
+            if right_values is not None:
+                return any(matches_literal(left, item) for item in right_values)
+            left_values = finite_literals(left)
+            if left_values is not None:
+                return any(matches_literal(right, item) for item in left_values)
+            return True
+
+        def walk(nodes, pending=None):
+            pending = list(pending or [])
             for op, value in nodes:
                 if str(op) in {"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}:
-                    _, maximum, child = value
-                    if maximum > 1 and (
-                        len(child) != 1
-                        or child[0][0]
-                        not in {
+                    minimum, maximum, child = value
+                    if maximum > 1:
+                        if len(child) != 1 or child[0][0] not in {
                             _parser.LITERAL,
                             _parser.NOT_LITERAL,
                             _parser.IN,
                             _parser.CATEGORY,
                             _parser.ANY,
-                        }
-                    ):
-                        raise ConfigurationError(
-                            f"{field_name} repeats a compound expression"
-                        )
-                    walk(child)
+                        }:
+                            raise ConfigurationError(
+                                f"{field_name} repeats a compound expression"
+                            )
+                        if any(overlaps(atom, child[0]) for atom in pending):
+                            raise ConfigurationError(
+                                f"{field_name} contains overlapping repetitions"
+                            )
+                        pending = pending + [child[0]] if minimum == 0 else [child[0]]
+                    else:
+                        child_end = walk(child, pending)
+                        pending = pending + child_end if minimum == 0 else child_end
                 elif op == _parser.SUBPATTERN:
-                    walk(value[-1])
+                    pending = walk(value[-1], pending)
                 elif op == _parser.BRANCH:
-                    for branch in value[1]:
-                        walk(branch)
+                    pending = [
+                        atom for branch in value[1] for atom in walk(branch, pending)
+                    ]
+                elif op == _parser.LITERAL:
+                    pending = [atom for atom in pending if matches_literal(atom, value)]
+                elif str(op) in {"ASSERT", "ASSERT_NOT", "GROUPREF", "GROUPREF_EXISTS"}:
+                    raise ConfigurationError(
+                        f"{field_name} contains an unsupported assertion or reference"
+                    )
+                pending = list({repr(atom): atom for atom in pending}.values())
+            return pending
 
         walk(_parser.parse(compiled.pattern, compiled.flags))
     except re.error as exc:
@@ -1314,13 +1377,28 @@ def _open_private_key(path: Path, *, create: bool) -> int:
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_void_p),
     ]
-    advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+    advapi.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    advapi.EqualSid.restype = wintypes.BOOL
+    advapi.GetSecurityDescriptorControl.argtypes = [
         ctypes.c_void_p,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(wintypes.WORD),
         ctypes.POINTER(wintypes.DWORD),
     ]
+    advapi.GetAce.argtypes = [
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+
+    class AclHeader(ctypes.Structure):
+        _fields_ = [
+            ("revision", ctypes.c_ubyte),
+            ("unused", ctypes.c_ubyte),
+            ("size", wintypes.WORD),
+            ("count", wintypes.WORD),
+            ("unused2", wintypes.WORD),
+        ]
+
     descriptor = ctypes.c_void_p()
     if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
         expected, 1, ctypes.byref(descriptor), None
@@ -1346,23 +1424,52 @@ def _open_private_key(path: Path, *, create: bool) -> int:
         raise ctypes.WinError(error)
     try:
         loaded = ctypes.c_void_p()
+        owner = ctypes.c_void_p()
+        dacl = ctypes.c_void_p()
         error = advapi.GetSecurityInfo(
-            handle, 1, 5, None, None, None, None, ctypes.byref(loaded)
+            handle,
+            1,
+            5,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(loaded),
         )
         if error:
             raise ctypes.WinError(error)
-        rendered = wintypes.LPWSTR()
         try:
-            if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                loaded, 1, 5, ctypes.byref(rendered), None
+            control, revision = wintypes.WORD(), wintypes.DWORD()
+            if not advapi.GetSecurityDescriptorControl(
+                loaded, ctypes.byref(control), ctypes.byref(revision)
             ):
                 raise ctypes.WinError(ctypes.get_last_error())
-            if rendered.value != expected:
+            if (
+                not owner
+                or not advapi.EqualSid(owner, owner_sid)
+                or not dacl
+                or not (control.value & 0x1000)
+            ):
                 raise ConfigurationError("Privacy key owner or protected ACL is unsafe")
+            header = ctypes.cast(dacl, ctypes.POINTER(AclHeader)).contents
+            if header.count != 1:
+                raise ConfigurationError("Privacy key ACL must grant only its owner")
+            ace = ctypes.c_void_p()
+            if not advapi.GetAce(dacl, 0, ctypes.byref(ace)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            ace_bytes = ctypes.cast(ace, ctypes.POINTER(ctypes.c_ubyte))
+            mask = ctypes.c_uint32.from_address(ace.value + 4).value
+            if (
+                ace_bytes[0] != 0
+                or ace_bytes[1] != 0
+                or mask != 0x001F01FF
+                or not (advapi.EqualSid(ctypes.c_void_p(ace.value + 8), owner_sid))
+            ):
+                raise ConfigurationError(
+                    "Privacy key ACL does not grant owner-only access"
+                )
         finally:
             kernel.LocalFree(loaded)
-            if rendered:
-                kernel.LocalFree(ctypes.cast(rendered, ctypes.c_void_p))
         fd = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
         handle = None
         return fd
@@ -2609,10 +2716,16 @@ class MetricsStore:
 
 @contextlib.contextmanager
 def _evidence_budget(data_dir: Path, added_bytes: int, added_files: int = 1):
-    """Serialize evidence admission across processes without pruning evidence."""
-    with CrossProcessFileLock(data_dir / "locks" / "evidence-budget.lock"):
+    """Reserve evidence capacity without holding the quota lock during I/O."""
+    lock = data_dir / "locks" / "evidence-budget.lock"
+    reservations = data_dir / ".evidence-reservations"
+    reservations.mkdir(parents=True, exist_ok=True)
+    if reservations.is_symlink():
+        raise StorageError("Evidence reservation directory must not use links")
+    reservation = reservations / f"{uuid.uuid4().hex}.json"
+    with CrossProcessFileLock(lock):
         used_bytes = used_files = 0
-        for name in ("audit", "reviews", "incidents"):
+        for name in ("audit", "reviews", "incidents", ".evidence-reservations"):
             directory = data_dir / name
             if directory.is_symlink():
                 raise StorageError("Evidence directory must not be a symbolic link")
@@ -2624,15 +2737,39 @@ def _evidence_budget(data_dir: Path, added_bytes: int, added_files: int = 1):
                         raise StorageError("Unexpected entry in evidence directory")
                     used_files += 1
                     used_bytes += entry.stat(follow_symlinks=False).st_size
-                    if used_files + added_files > MAX_EVIDENCE_FILES or (
-                        used_bytes + added_bytes > MAX_EVIDENCE_BYTES
+                    if name == ".evidence-reservations":
+                        pending = _load_json_file(Path(entry.path), maximum_bytes=1024)
+                        if not isinstance(pending, dict) or any(
+                            not isinstance(pending.get(key), int)
+                            or isinstance(pending[key], bool)
+                            or pending[key] < 0
+                            for key in ("bytes", "files")
+                        ):
+                            raise StorageError("Evidence reservation is invalid")
+                        used_bytes += pending["bytes"]
+                        used_files += pending["files"]
+                    if used_files + added_files + 1 > MAX_EVIDENCE_FILES or (
+                        used_bytes + added_bytes + 512 > MAX_EVIDENCE_BYTES
                     ):
                         raise StorageError(
                             "Evidence quota exhausted; archive evidence before retrying"
                         )
-        if added_bytes > MAX_EVIDENCE_BYTES or added_files > MAX_EVIDENCE_FILES:
+        if (
+            added_bytes + 512 > MAX_EVIDENCE_BYTES
+            or added_files + 1 > MAX_EVIDENCE_FILES
+        ):
             raise StorageError("Evidence exceeds the configured quota")
+        _atomic_json_write(
+            reservation, {"bytes": added_bytes, "files": added_files}, create_only=True
+        )
+    try:
         yield
+    finally:
+        try:
+            with CrossProcessFileLock(lock):
+                reservation.unlink()
+        except OSError as exc:
+            raise StorageError("Unable to release evidence reservation") from exc
 
 
 class AuditStore:
@@ -2749,7 +2886,7 @@ class AuditStore:
         self.audit_dir.mkdir(parents=True, exist_ok=True)
         with (
             _evidence_budget(self.config.data_dir, MAX_AUDIT_LINE_BYTES, 2),
-            CrossProcessFileLock(self.lock_path),
+            CrossProcessFileLock(self.lock_path, timeout=300),
         ):
             previous_hash = self._last_event_hash()
             core = dict(event)
@@ -2808,7 +2945,7 @@ class AuditStore:
                         "updated_at": _utcnow().isoformat(),
                     },
                 )
-            except OSError as exc:
+            except (OSError, StorageError) as exc:
                 if remote_location:
                     amendment = {
                         **core,

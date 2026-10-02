@@ -11,6 +11,95 @@ from tests.test_orchestrator import FakeBedrockClient, GuardrailTestCase
 
 
 class SecurityRegressionTests(GuardrailTestCase):
+    def test_block_queue_is_exactly_l3_even_in_monitor_mode(self):
+        from tests.test_orchestrator import RecordingClient
+
+        for mode in ("enforce", "monitor"):
+            system = self.make_live_system(
+                FakeBedrockClient(),
+                enforcement_mode=mode,
+                review_queue_l1="https://example.invalid/l1",
+                review_queue_l2="https://example.invalid/l2",
+                review_queue_l3="https://example.invalid/l3",
+            )
+            sqs = RecordingClient()
+            system.provider._clients["sqs"] = sqs
+            result = system.process("Synthetic SSN 123-45-6789.")
+            self.assertEqual(result["recommended_action"], "block")
+            self.assertEqual(len(sqs.calls), 1)
+            self.assertEqual(sqs.calls[0][1]["QueueUrl"], "https://example.invalid/l3")
+            self.assertEqual(
+                sqs.calls[0][1]["MessageAttributes"]["ReviewLevel"]["StringValue"], "l3"
+            )
+
+    def test_overlapping_ungrouped_quantifiers_are_rejected(self):
+        for pattern in (
+            r"a+a+$",
+            r"a*a*a*a*b$",
+            r"a+aa+$",
+            r"a+b?a+$",
+            r"[A-Z]+a+$",
+            r"(?=a+a+$)",
+        ):
+            with (
+                self.subTest(pattern=pattern),
+                self.assertRaises(app.ConfigurationError),
+            ):
+                app._validate_safe_pattern(pattern, "fixture")
+        for pattern in (r"a+b+a+$", r"a+[bc]{1,20}"):
+            app._validate_safe_pattern(pattern, "fixture")
+
+    def test_remote_audit_does_not_hold_global_evidence_admission_lock(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        entered, released = threading.Event(), threading.Event()
+
+        class BlockedDelivery:
+            def put_object(self, **kwargs):
+                entered.set()
+                if not released.wait(5):
+                    raise TimeoutError("fixture")
+                return {}
+
+        system = self.make_live_system(FakeBedrockClient(), audit_bucket="fixture")
+        system.provider._clients["s3"] = BlockedDelivery()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            audit = pool.submit(system.audit.write, {"event_type": "fixture"})
+            try:
+                self.assertTrue(entered.wait(2))
+                review = pool.submit(
+                    system.reviews.create, {"request_id_hash": "fixture"}, "l1"
+                )
+                self.assertTrue(review.result(timeout=2)["local_location"])
+            finally:
+                released.set()
+            self.assertTrue(audit.result(timeout=2)["record_hash"])
+        self.assertEqual(
+            list((system.config.data_dir / ".evidence-reservations").glob("*.json")), []
+        )
+
+    def test_chain_head_failure_attempts_remote_blocking_amendment(self):
+        from tests.test_orchestrator import RecordingClient
+
+        system = self.make_live_system(FakeBedrockClient(), audit_bucket="fixture")
+        s3 = RecordingClient()
+        system.provider._clients["s3"] = s3
+        original = app._atomic_json_write
+
+        def fail_chain(path, *args, **kwargs):
+            if path == system.audit.chain_path:
+                raise app.StorageError("fixture chain failure")
+            return original(path, *args, **kwargs)
+
+        with patch.object(app, "_atomic_json_write", side_effect=fail_chain):
+            result = system.process("Safe request.")
+        self.assertEqual(result["action"], "block")
+        self.assertEqual(len(s3.calls), 2)
+        amendment = json.loads(s3.calls[-1][1]["Body"])
+        self.assertEqual(amendment["enforced_action"], "block")
+        self.assertEqual(amendment["event_type"], "audit_delivery_failure")
+
     def test_kms_signature_is_verified_and_forged_tail_blocks_append(self):
         import hashlib
         import hmac
