@@ -69,6 +69,21 @@ Before enabling live AWS mode:
 
 ## Scope
 
+Compact JWT/JOSE detection decodes a bounded protected header rather than relying
+on its textual base64url prefix. It recognizes credentials for containment and
+does not verify their signatures, authorize their holders, or validate claims.
+Encoded header, payload, and signature segments are limited to 4,096, 32,768,
+and 8,192 characters respectively. Oversized compact candidates raise a local
+validation error instead of silently bypassing privacy processing.
+Common `access_token=` syntax is recognized. Header suffix checks for hyphen or
+underscore labels are limited to 64 candidates; exhaustion fails closed.
+
+Policy identifiers must be unique after the exact normalization used by runtime
+maps. Whitespace collisions are rejected in topic, role, weight, and profile
+names; entity-action names additionally reject uppercase collisions. Accepted
+documents retain their existing digest format and are independent of JSON
+object member order.
+
 Security reports may include:
 
 - Bypass of trusted profile or authorization boundaries

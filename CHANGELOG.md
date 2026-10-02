@@ -6,6 +6,11 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Security
+
+- Recognize compact JWT/JOSE credentials structurally, including signed headers with JSON whitespace, before input, output, or retrieval content reaches cloud evaluation. This detects sensitive content; it does not authenticate tokens. Oversized compact candidates fail closed before decoding.
+- Reject whitespace or case collisions in normalized policy identifiers before enforcement or digest acceptance. Existing valid policy digests remain unchanged.
+
 ## [4.1.1] - 2026-09-29
 
 ### Changed
