@@ -25,11 +25,11 @@
     "internal account reference"
   ],
   "prompt_attack_patterns": [
-    "ignore\\s+(?:all\\s+)?(?:prior|previous)\\s+instructions",
-    "reveal\\s+(?:the\\s+)?(?:hidden\\s+)?system\\s+prompt",
-    "print\\s+(?:all\\s+)?(?:environment\\s+variables|secrets)",
-    "bypass\\s+(?:the\\s+)?(?:guardrail|policy|safety)",
-    "pretend\\s+to\\s+be\\s+(?:an?\\s+)?(?:administrator|root|system)"
+    "ignore\\s{1,64}(?:all\\s{1,64})?(?:prior|previous)\\s{1,64}instructions",
+    "reveal\\s{1,64}(?:the\\s{1,64})?(?:hidden\\s{1,64})?system\\s{1,64}prompt",
+    "print\\s{1,64}(?:all\\s{1,64})?(?:environment\\s{1,64}variables|secrets)",
+    "bypass\\s{1,64}(?:the\\s{1,64})?(?:guardrail|policy|safety)",
+    "pretend\\s{1,64}to\\s{1,64}be\\s{1,64}(?:an?\\s{1,64})?(?:administrator|root|system)"
   ],
   "presidio_entities": [
     "CREDIT_CARD",

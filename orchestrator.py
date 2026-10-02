@@ -361,12 +361,36 @@ def _privacy_key_from_env() -> bytes | None:
     return key
 
 
+def _is_default_ignorable(character: str) -> bool:
+    # Unicode Default_Ignorable_Code_Point includes format controls, fillers,
+    # variation selectors and reserved tag space. Keep ordinary combining marks.
+    codepoint = ord(character)
+    return unicodedata.category(character) == "Cf" or any(
+        low <= codepoint <= high
+        for low, high in (
+            (0x034F, 0x034F),
+            (0x115F, 0x1160),
+            (0x17B4, 0x17B5),
+            (0x180B, 0x180F),
+            (0x2065, 0x2065),
+            (0x3164, 0x3164),
+            (0xFE00, 0xFE0F),
+            (0xFFA0, 0xFFA0),
+            (0xFFF0, 0xFFF8),
+            (0x1BCA0, 0x1BCA3),
+            (0x1D173, 0x1D17A),
+            (0xE0000, 0xE0FFF),
+        )
+    )
+
+
 def _normalize_for_detection(text: str) -> str:
-    normalized = unicodedata.normalize("NFKC", text).translate(ZERO_WIDTH_TRANSLATION)
+    normalized = unicodedata.normalize("NFKC", text)
     return "".join(
         character
         for character in normalized
-        if character in {"\n", "\r", "\t"} or unicodedata.category(character) != "Cc"
+        if not _is_default_ignorable(character)
+        and (character in {"\n", "\r", "\t"} or unicodedata.category(character) != "Cc")
     )
 
 
@@ -851,8 +875,8 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
         # A repeated compound expression can backtrack exponentially even without
         # nested quantifiers. Limit repetition to one character-class atom.
         try:
-            from re import _parser
-        except ImportError:  # Python 3.10 keeps the parser in its legacy module.
+            _parser = re._parser
+        except AttributeError:  # Python 3.10 keeps the parser in its legacy module.
             import sre_parse as _parser
 
         def matches_literal(atom, codepoint):
@@ -912,6 +936,10 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
             for op, value in nodes:
                 if str(op) in {"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}:
                     minimum, maximum, child = value
+                    if maximum == _parser.MAXREPEAT or maximum > 256:
+                        raise ConfigurationError(
+                            f"{field_name} requires repetitions bounded to 256"
+                        )
                     if maximum > 1:
                         if len(child) != 1 or child[0][0] not in {
                             _parser.LITERAL,
@@ -955,7 +983,7 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
                             pending.append(child[0])
                             continue
                         child_end = walk(child, pending)
-                        pending = pending + child_end if minimum == 0 else child_end
+                        pending = child_end
                 elif op == _parser.SUBPATTERN:
                     pending = walk(value[-1], pending)
                 elif op == _parser.BRANCH:
@@ -1624,6 +1652,9 @@ class RegexRecognizer:
     checksum: str | None = None
 
 
+MAX_PRIVACY_FINDINGS = 256
+MAX_PUBLIC_RESPONSE_BYTES = 1_048_576
+
 REGEX_RECOGNIZERS = (
     RegexRecognizer(
         "US_SOCIAL_SECURITY_NUMBER", re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)"), 0.85
@@ -1643,7 +1674,9 @@ REGEX_RECOGNIZERS = (
     RegexRecognizer(
         "EMAIL_ADDRESS",
         re.compile(
-            r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}\b"
+            r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
+            r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@"
+            r"[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}\b"
         ),
         0.75,
     ),
@@ -1792,6 +1825,8 @@ class PrivacyEngine:
         findings: list[EntityFinding] = []
         for recognizer in REGEX_RECOGNIZERS:
             for match in recognizer.pattern.finditer(text):
+                if len(findings) >= MAX_PRIVACY_FINDINGS:
+                    raise InputValidationError("Privacy finding budget exceeded")
                 value = match.group(0)
                 validated = False
                 if recognizer.checksum == "luhn":
@@ -1836,8 +1871,12 @@ class PrivacyEngine:
             return []
         findings: list[EntityFinding] = []
         for result in results:
+            if len(findings) >= MAX_PRIVACY_FINDINGS:
+                raise InputValidationError("Privacy finding budget exceeded")
             try:
                 entity_type = str(result.entity_type).upper()
+                if len(entity_type) > 64:
+                    raise InputValidationError("Privacy entity label is too long")
                 start = int(result.start)
                 end = int(result.end)
                 confidence = float(result.score)
@@ -1861,44 +1900,69 @@ class PrivacyEngine:
 
     @staticmethod
     def _deduplicate(findings: list[EntityFinding]) -> list[EntityFinding]:
-        ranked = sorted(
-            findings,
-            key=lambda item: (
-                -ACTION_PRECEDENCE[item.action],
-                -item.confidence,
-                -(item.end - item.start),
-                item.start,
-            ),
-        )
+        if len(findings) > MAX_PRIVACY_FINDINGS:
+            raise InputValidationError("Privacy finding budget exceeded")
         selected: list[EntityFinding] = []
-        for candidate in ranked:
-            if any(
-                candidate.start < existing.end and candidate.end > existing.start
-                for existing in selected
-            ):
+        for candidate in sorted(findings, key=lambda item: (item.start, item.end)):
+            if not selected or candidate.start >= selected[-1].end:
+                selected.append(candidate)
                 continue
-            selected.append(candidate)
-        return sorted(selected, key=lambda item: item.start)
+            existing = selected[-1]
+            strongest = max(
+                (existing, candidate),
+                key=lambda item: (
+                    ACTION_PRECEDENCE[item.action],
+                    item.confidence,
+                ),
+            )
+            selected[-1] = EntityFinding(
+                entity_type=strongest.entity_type,
+                start=existing.start,
+                end=max(existing.end, candidate.end),
+                confidence=max(existing.confidence, candidate.confidence),
+                recognizer=strongest.recognizer,
+                action=strongest.action,
+                checksum_validated=existing.checksum_validated
+                or candidate.checksum_validated,
+            )
+        return selected
 
     @staticmethod
     def _replacement(entity_type: str) -> str:
-        safe_label = re.sub(r"[^A-Z0-9]+", "_", entity_type.upper()).strip("_")
+        safe_label = re.sub(r"[^A-Z0-9]+", "_", entity_type[:64].upper()).strip("_")
         return f"[{safe_label}_REDACTED]"
 
     def evaluate(self, text: str, field_name: str) -> PrivacyResult:
-        text = _normalize_for_detection(text)
+        limit_name = (
+            "max_context_chars"
+            if field_name == "retrieval_context"
+            else "max_input_chars"
+            if field_name in {"input", "aws_input_output"}
+            else "max_output_chars"
+        )
+        maximum = min(getattr(self.config, limit_name), self.bundle.limits[limit_name])
+        text = validate_text(text, field_name, maximum, required=False)
         findings = self._regex_findings(text)
         if self.config.presidio_mode != "disabled":
             findings.extend(self._presidio_findings(text))
         findings = self._deduplicate(findings)
 
-        sanitized = text
-        for finding in reversed(findings):
-            sanitized = (
-                sanitized[: finding.start]
-                + self._replacement(finding.entity_type)
-                + sanitized[finding.end :]
-            )
+        parts: list[str] = []
+        cursor = 0
+        size = 0
+        for finding in findings:
+            prefix = text[cursor : finding.start]
+            replacement = self._replacement(finding.entity_type)
+            size += len(prefix.encode("utf-8")) + len(replacement.encode("utf-8"))
+            if size > maximum:
+                raise InputValidationError("Privacy replacement exceeds text budget")
+            parts.extend((prefix, replacement))
+            cursor = finding.end
+        tail = text[cursor:]
+        if size + len(tail.encode("utf-8")) > maximum:
+            raise InputValidationError("Privacy replacement exceeds text budget")
+        parts.append(tail)
+        sanitized = "".join(parts)
 
         grouped: dict[tuple[str, GuardrailAction], list[EntityFinding]] = {}
         for finding in findings:
@@ -1990,9 +2054,10 @@ class LocalPolicyEngine:
     def evaluate(self, text: str, field_name: str) -> tuple[str, list[Detection]]:
         normalized = _normalize_for_detection(text)
         detections: list[Detection] = []
+        policy_text = " ".join(normalized.split())
 
         for topic, patterns in self.denied_topics.items():
-            hits = sum(1 for pattern in patterns if pattern.search(normalized))
+            hits = sum(1 for pattern in patterns if pattern.search(policy_text))
             if hits:
                 detections.append(
                     Detection(
@@ -2019,11 +2084,29 @@ class LocalPolicyEngine:
                     )
                 )
 
-        masked = text
+        limit_name = (
+            "max_context_chars"
+            if field_name == "retrieval_context"
+            else "max_input_chars"
+            if field_name in {"input", "aws_input_output"}
+            else "max_output_chars"
+        )
+        maximum = self.bundle.limits[limit_name]
+        masked = validate_text(normalized, field_name, maximum, required=False)
         masked_hits = 0
         for term in self.bundle.masked_terms:
             pattern = self._term_pattern(term)
-            masked, count = pattern.subn("[POLICY_TERM_REDACTED]", masked)
+            byte_size = len(masked.encode("utf-8"))
+
+            def replace_term(match: re.Match[str]) -> str:
+                nonlocal byte_size
+                replacement = "[POLICY_TERM_REDACTED]"
+                byte_size += len(replacement) - len(match.group(0).encode("utf-8"))
+                if byte_size > maximum:
+                    raise InputValidationError("Policy replacement exceeds byte budget")
+                return replacement
+
+            masked, count = pattern.subn(replace_term, masked)
             masked_hits += count
         if masked_hits:
             detections.append(
@@ -2039,7 +2122,7 @@ class LocalPolicyEngine:
             )
 
         attack_hits = sum(
-            1 for pattern in self.prompt_patterns if pattern.search(normalized)
+            1 for pattern in self.prompt_patterns if pattern.search(policy_text)
         )
         role_tokens = (
             "developer message",
@@ -2049,9 +2132,7 @@ class LocalPolicyEngine:
             "system prompt",
         )
         token_hits = sum(token in normalized.lower() for token in role_tokens)
-        invisible_count = sum(
-            ord(character) in ZERO_WIDTH_TRANSLATION for character in text
-        )
+        invisible_count = sum(_is_default_ignorable(character) for character in text)
         attack_score = _clip(
             (attack_hits * 0.3) + (token_hits * 0.08) + min(invisible_count * 0.02, 0.2)
         )
@@ -2425,6 +2506,7 @@ class BedrockGuardrailAdapter:
                     key in finding
                     for key in (
                         "invalid",
+                        "satisfiable",
                         "impossible",
                         "translationAmbiguous",
                         "tooComplex",
@@ -2442,6 +2524,115 @@ class BedrockGuardrailAdapter:
                         )
                     )
         return detections
+
+    @staticmethod
+    def _validate_reasoning_finding(finding: dict[str, Any]) -> None:
+        schemas = {
+            "valid": {
+                "translation": dict,
+                "claimsTrueScenario": dict,
+                "supportingRules": list,
+                "logicWarning": dict,
+            },
+            "invalid": {
+                "translation": dict,
+                "contradictingRules": list,
+                "logicWarning": dict,
+            },
+            "satisfiable": {
+                "translation": dict,
+                "claimsTrueScenario": dict,
+                "claimsFalseScenario": dict,
+                "logicWarning": dict,
+            },
+            "impossible": {
+                "translation": dict,
+                "contradictingRules": list,
+                "logicWarning": dict,
+            },
+            "translationAmbiguous": {"options": list, "differenceScenarios": list},
+            "tooComplex": {},
+            "noTranslations": {},
+        }
+        if len(finding) != 1 or next(iter(finding), None) not in schemas:
+            raise ExternalServiceError("Unknown automated reasoning variant")
+        variant, payload = next(iter(finding.items()))
+        schema = schemas[variant]
+        if (
+            not isinstance(payload, dict)
+            or set(payload) - set(schema)
+            or any(not isinstance(value, schema[key]) for key, value in payload.items())
+        ):
+            raise ExternalServiceError("Invalid automated reasoning payload")
+
+        def statements(value: Any) -> bool:
+            return (
+                isinstance(value, list)
+                and len(value) <= 256
+                and all(
+                    isinstance(item, dict)
+                    and bool(item)
+                    and not set(item) - {"logic", "naturalLanguage"}
+                    and all(
+                        isinstance(text, str) and len(text) <= 1000
+                        for text in item.values()
+                    )
+                    for item in value
+                )
+            )
+
+        for key in ("translation", "claimsTrueScenario", "claimsFalseScenario"):
+            if key not in payload:
+                continue
+            value = payload[key]
+            if key == "translation":
+                if set(value) - {
+                    "premises",
+                    "claims",
+                    "untranslatedPremises",
+                    "untranslatedClaims",
+                    "confidence",
+                }:
+                    raise ExternalServiceError("Unknown reasoning translation field")
+                for name in ("premises", "claims"):
+                    if name in value and not statements(value[name]):
+                        raise ExternalServiceError("Invalid reasoning statements")
+                confidence = value.get("confidence", 1)
+                if (
+                    isinstance(confidence, bool)
+                    or not isinstance(confidence, (int, float))
+                    or not 0 <= confidence <= 1
+                ):
+                    raise ExternalServiceError("Invalid reasoning confidence")
+                for name in ("untranslatedPremises", "untranslatedClaims"):
+                    if name in value and (
+                        not isinstance(value[name], list)
+                        or len(value[name]) > 256
+                        or any(
+                            not isinstance(item, dict)
+                            or set(item) != {"text"}
+                            or not isinstance(item["text"], str)
+                            or len(item["text"]) > 1000
+                            for item in value[name]
+                        )
+                    ):
+                        raise ExternalServiceError("Invalid untranslated references")
+            elif set(value) != {"statements"} or not statements(value["statements"]):
+                raise ExternalServiceError("Invalid reasoning scenario")
+        if variant == "valid" and (
+            not payload.get("translation", {}).get("claims")
+            or not payload.get("claimsTrueScenario", {}).get("statements")
+            or payload.get("logicWarning")
+            or payload.get("translation", {}).get("untranslatedClaims")
+            or payload.get("translation", {}).get("untranslatedPremises")
+        ):
+            raise ExternalServiceError("Incomplete positive reasoning proof")
+        # Safe conclusions must carry the translation and a concrete true scenario.
+        # Unknown or empty positive conclusions are never an authorization to release.
+        if variant in {"valid", "satisfiable"} and (
+            not payload.get("translation") or not payload.get("claimsTrueScenario")
+        ):
+            raise ExternalServiceError("Incomplete automated reasoning conclusion")
 
     @classmethod
     def _parse_response(
@@ -2495,6 +2686,8 @@ class BedrockGuardrailAdapter:
                             "AWS guardrail returned invalid findings"
                         )
                     for item in collection:
+                        if name == "automatedReasoningPolicy":
+                            cls._validate_reasoning_finding(item)
                         if name != "automatedReasoningPolicy" and (
                             item.get("action") not in {"NONE", "BLOCKED", "ANONYMIZED"}
                             or (
@@ -3404,7 +3597,9 @@ def validate_context(
             )
         if not isinstance(item.get("text"), str):
             raise InputValidationError("Retrieval context text must be a string")
-        text = item["text"]
+        text = validate_text(
+            item["text"], "retrieval_context", max_context_chars, required=True
+        )
         if not text or len(text) > max_context_chars:
             raise InputValidationError("Retrieval context text is empty or too long")
         if "\x00" in text:
@@ -3422,6 +3617,8 @@ def validate_context(
             raise InputValidationError("Retrieval context id is unsupported")
         retrieval_contexts.append({"id": item_id, "text": text})
     context["retrieval_contexts"] = retrieval_contexts
+    if len(_canonical_json(context)) > max_context_chars:
+        raise InputValidationError("Canonical context exceeds UTF-8 byte budget")
     return context
 
 
@@ -3432,6 +3629,11 @@ def validate_text(
         value = ""
     if not isinstance(value, str):
         raise InputValidationError(f"{field_name} must be a string")
+    if len(value) > maximum_chars:
+        raise InputValidationError(f"{field_name} raw text exceeds character budget")
+    if "\x00" in value:
+        raise InputValidationError(f"{field_name} contains a NUL byte")
+    value = _normalize_for_detection(value)
     if required and not value.strip():
         raise InputValidationError(f"{field_name} cannot be empty")
     if len(value) > maximum_chars:
@@ -3439,7 +3641,8 @@ def validate_text(
     if "\x00" in value:
         raise InputValidationError(f"{field_name} contains a NUL byte")
     try:
-        value.encode("utf-8")
+        if len(value.encode("utf-8")) > maximum_chars:
+            raise InputValidationError(f"{field_name} exceeds UTF-8 byte budget")
     except UnicodeEncodeError as exc:
         raise InputValidationError(f"{field_name} contains invalid Unicode") from exc
     return value
@@ -3733,13 +3936,23 @@ class BedrockGuardrailSystem:
         masked_input, input_policy_detections = self.local_policy.evaluate(
             ctx.sanitized_input, "input"
         )
-        ctx.sanitized_input = _normalize_for_detection(masked_input)
+        ctx.sanitized_input = validate_text(
+            masked_input,
+            "input",
+            self._effective_limits()["max_input_chars"],
+            required=False,
+        )
         ctx.detections.extend(input_policy_detections)
         if ctx.sanitized_output:
             masked_output, output_policy_detections = self.local_policy.evaluate(
                 ctx.sanitized_output, "output"
             )
-            ctx.sanitized_output = _normalize_for_detection(masked_output)
+            ctx.sanitized_output = validate_text(
+                masked_output,
+                "output",
+                self._effective_limits()["max_output_chars"],
+                required=False,
+            )
             ctx.detections.extend(output_policy_detections)
 
         ctx.detections.extend(self.authorization.evaluate(safe_context))
@@ -3750,13 +3963,25 @@ class BedrockGuardrailSystem:
             context_text, context_policy_detections = self.local_policy.evaluate(
                 privacy_result.sanitized_text, "retrieval_context"
             )
-            context_text = _normalize_for_detection(context_text)
+            context_text = validate_text(
+                context_text,
+                "retrieval_context",
+                self._effective_limits()["max_context_chars"],
+                required=False,
+            )
             ctx.detections.extend(privacy_result.detections)
             ctx.detections.extend(context_policy_detections)
             if privacy_result.engine_status == "degraded":
                 ctx.diagnostics.append("presidio_degraded")
             sanitized_retrieval_contexts.append(
                 {"id": item["id"], "text": context_text}
+            )
+        if (
+            len(_canonical_json(sanitized_retrieval_contexts))
+            > self._effective_limits()["max_context_chars"]
+        ):
+            raise InputValidationError(
+                "Sanitized retrieval context exceeds byte budget"
             )
         ctx.grounding = self.grounding_engine.evaluate(
             ctx.sanitized_output, sanitized_retrieval_contexts
@@ -3831,7 +4056,12 @@ class BedrockGuardrailSystem:
                 rechecked_text, rechecked_policy = self.local_policy.evaluate(
                     rechecked_privacy.sanitized_text, "aws_input_output"
                 )
-                ctx.sanitized_input = _normalize_for_detection(rechecked_text)
+                ctx.sanitized_input = validate_text(
+                    rechecked_text,
+                    "input",
+                    self._effective_limits()["max_input_chars"],
+                    required=False,
+                )
                 ctx.detections.extend(rechecked_privacy.detections)
                 ctx.detections.extend(rechecked_policy)
                 ctx.diagnostics.append("aws_input_output:rechecked")
@@ -3873,7 +4103,12 @@ class BedrockGuardrailSystem:
                     rechecked_text, rechecked_policy = self.local_policy.evaluate(
                         rechecked_privacy.sanitized_text, "aws_output_output"
                     )
-                    ctx.sanitized_output = _normalize_for_detection(rechecked_text)
+                    ctx.sanitized_output = validate_text(
+                        rechecked_text,
+                        "output",
+                        self._effective_limits()["max_output_chars"],
+                        required=False,
+                    )
                     ctx.detections.extend(rechecked_privacy.detections)
                     ctx.detections.extend(rechecked_policy)
                     ctx.diagnostics.append("aws_output_output:rechecked")
@@ -4071,7 +4306,7 @@ class BedrockGuardrailSystem:
             GuardrailAction.ALLOW,
             GuardrailAction.SANITIZE,
         }
-        return {
+        result = {
             "schema_version": 1,
             "product": PRODUCT_NAME,
             "product_version": __version__,
@@ -4100,6 +4335,9 @@ class BedrockGuardrailSystem:
             "incident_created": incident_location is not None,
             "safe_fallback": self._safe_fallback(ctx.enforced_action),
         }
+        if len(_canonical_json(result)) > MAX_PUBLIC_RESPONSE_BYTES:
+            raise InputValidationError("Public response exceeds byte budget")
+        return result
 
     @staticmethod
     def _safe_fallback(action: GuardrailAction) -> str:
@@ -4539,6 +4777,12 @@ def _lambda_authorizer_context(event: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _lambda_response(status_code: int, body: Mapping[str, Any]) -> dict[str, Any]:
+    serialized = json.dumps(
+        body, ensure_ascii=False, separators=(",", ":"), default=str
+    )
+    if len(serialized.encode("utf-8")) > MAX_PUBLIC_RESPONSE_BYTES:
+        status_code = 413
+        serialized = '{"error":"response_too_large"}'
     return {
         "statusCode": status_code,
         "headers": {
@@ -4546,7 +4790,7 @@ def _lambda_response(status_code: int, body: Mapping[str, Any]) -> dict[str, Any
             "Content-Type": "application/json; charset=utf-8",
             "X-Content-Type-Options": "nosniff",
         },
-        "body": json.dumps(body, ensure_ascii=True, separators=(",", ":"), default=str),
+        "body": serialized,
     }
 
 

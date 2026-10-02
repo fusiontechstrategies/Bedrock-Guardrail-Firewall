@@ -224,3 +224,12 @@ Residual risk: the calling application must actually enforce the returned action
 - [ ] The calling application enforces action and capability results.
 - [ ] Rate limits and concurrency limits are configured.
 - [ ] The full automated suite, red-team suite, and audit verification pass.
+
+
+## Canonical text and resource limits
+
+Text is normalized with NFKC and stripped of Unicode default-ignorable characters before privacy and policy checks. Ordinary accented text is preserved. Cloud calls and released content use that same canonical text. Configured text limits cap both characters and UTF-8 bytes after normalization and each privacy/policy transformation. Retrieval context also has an aggregate serialized byte limit. Privacy processing accepts at most 256 findings per field, merges overlapping spans before one-pass redaction, and rejects excess findings or replacement expansion. Rejection releases no content. Local policy regular expressions require finite repetitions of at most 256 characters; policy whitespace matching uses collapsed whitespace so long spacing cannot evade the shipped patterns. The final public response is capped at 1 MiB of UTF-8 JSON.
+
+Source archives classify executable/build members using Unicode-normalized, case-insensitive portable names, then require canonical spelling and exact reviewed bytes. CI additionally validates and installs the source archive on Windows with package downloads disabled. This proves source identity and package installation behavior; it does not assert operating-system network isolation of the build process.
+
+Unknown, malformed or incomplete automated-reasoning conclusions are service failures governed by the configured failure action. Satisfiable conclusions require human review. A positive valid conclusion must contain concrete translated claims and a true scenario, with no unresolved input or logic warning.

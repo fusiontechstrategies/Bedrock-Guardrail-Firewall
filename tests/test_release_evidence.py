@@ -64,6 +64,39 @@ class ReleaseEvidenceTests(unittest.TestCase):
                     wheel, VERSION, release.parse_optional_dependencies(root), root
                 )
 
+    def test_sdist_rejects_windows_active_case_aliases(self):
+        for alias in ("Setup.py", "setup.PY", "inject.PTH", "PyProject.toml"):
+            with self.subTest(alias=alias), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.make_source(root)
+                self.make_distributions(root / "dist")
+                sdist = next((root / "dist").glob("*.tar.gz"))
+                with tarfile.open(sdist, "r:gz") as archive:
+                    entries = [
+                        (
+                            member,
+                            archive.extractfile(member).read()
+                            if member.isfile()
+                            else b"",
+                        )
+                        for member in archive.getmembers()
+                    ]
+                with tarfile.open(sdist, "w:gz") as archive:
+                    for member, data in entries:
+                        archive.addfile(
+                            member, io.BytesIO(data) if member.isfile() else None
+                        )
+                    data = b"raise RuntimeError('unreviewed')"
+                    member = tarfile.TarInfo(
+                        f"bedrock_guardrail_firewall-{VERSION}/{alias}"
+                    )
+                    member.size = len(data)
+                    archive.addfile(member, io.BytesIO(data))
+                with self.assertRaisesRegex(
+                    release.ReleaseEvidenceError, "Non-canonical|non-portable duplicate"
+                ):
+                    release.validate_sdist(sdist, VERSION, root)
+
     def make_source(self, root: Path) -> None:
         (root / "scripts").mkdir()
         (root / "pyproject.toml").write_text(
