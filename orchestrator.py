@@ -904,11 +904,10 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
                 return any(matches_literal(right, item) for item in left_values)
             return True
 
-        optional_count = 0
         alternative_budget = 1
 
         def walk(nodes, pending=None):
-            nonlocal optional_count, alternative_budget
+            nonlocal alternative_budget
             pending = list(pending or [])
             for op, value in nodes:
                 if str(op) in {"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}:
@@ -934,15 +933,10 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
                         # the same input. A long chain of a? followed by a{n} is
                         # exponential even though no individual repeat exceeds 1.
                         if minimum == 0:
-                            optional_count += 1
                             alternative_budget *= 2
                             if alternative_budget > 256:
                                 raise ConfigurationError(
                                     f"{field_name} has too many alternative paths"
-                                )
-                            if optional_count > 8:
-                                raise ConfigurationError(
-                                    f"{field_name} has too many optional repeats"
                                 )
                             if len(child) != 1 or child[0][0] not in {
                                 _parser.LITERAL,
@@ -1349,8 +1343,8 @@ def _open_private_key(path: Path, *, create: bool) -> int:
     # Protect the key before its first byte is written. Validate the descriptor
     # of the opened handle, not a path that another process could replace.
     import ctypes
+    import ctypes.wintypes as wintypes
     import msvcrt
-    from ctypes import wintypes
 
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
