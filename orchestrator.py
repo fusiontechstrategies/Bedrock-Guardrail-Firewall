@@ -4997,8 +4997,8 @@ def _bounded_stdin_bytes() -> bytes:
         available = MAX_CLI_INPUT_BYTES + 1 - size
         if os.name == "nt":
             import ctypes
+            import ctypes.wintypes as wintypes
             import msvcrt
-            from ctypes import wintypes
 
             kernel = ctypes.WinDLL("kernel32", use_last_error=True)
             kernel.PeekNamedPipe.argtypes = [
