@@ -150,7 +150,9 @@ jobs:
           set -euo pipefail
           test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
           for asset in dist/*; do
-            case "$asset" in *.whl|*.tar.gz) ;; *) exit 1 ;; esac
+            if [[ "$asset" != *.whl && "$asset" != *.tar.gz ]]; then
+              exit 1
+            fi
             gh attestation verify "$asset" \
               --repo "$GH_REPO" \
               --signer-workflow "$GH_REPO/.github/workflows/release-candidate.yml" \
