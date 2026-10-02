@@ -98,7 +98,7 @@ export GUARDRAIL_DATA_DIR=/var/lib/bedrock-guardrail-firewall
 
 ## Stable privacy pseudonyms
 
-The runtime uses HMAC-SHA256 for subject pseudonyms and content digests. A desktop deployment creates a random local key in the data directory.
+The runtime uses HMAC-SHA256 for subject pseudonyms and content digests. A desktop deployment creates a random local key in the data directory. POSIX creation uses mode 0600 and no-follow opening; Windows creation supplies a protected owner-only ACL before writing. Loading validates the opened file, rejects hard links and unsafe permissions, and never repairs an unsafe existing key silently. Production services should inject the key from approved secret storage.
 
 For Lambda, containers, autoscaling groups, and other ephemeral or multi-instance deployments, inject the same secret key into every trusted instance:
 
@@ -290,8 +290,14 @@ python orchestrator.py --profile production doctor
 Audit integrity:
 
 ```powershell
-python orchestrator.py verify-audit
+python orchestrator.py verify-audit --expected-count 42 --expected-last-hash <trusted-checkpoint-sha256>
 ```
+
+Obtain the count and last hash from a separately protected checkpoint, such as an independently maintained immutable audit receipt. Do not read these values from the same local `chain.json` being checked. The verifier checks every configured KMS signature and the complete sequence against that checkpoint. Without a checkpoint, it reports local hash consistency but exits unsuccessfully because authenticity and truncation cannot be established. KMS verification needs `kms:Verify` on the configured signing key and live mode: add `--aws-mode live --allow-live-aws` before `verify-audit`. Preserve a zero-event checkpoint explicitly with `--expected-count 0`.
+
+Audit, review and incident admission share a cross-process quota of 256 MiB and 10,000 files. In-flight writes reserve their capacity under a short filesystem lock; AWS delivery does not hold that global lock. A killed process can leave a reservation, which must be reconciled against its evidence before an operator removes it. Admission includes reservations and scans at most the configured file limit. Audit appends remain serialized to preserve ordering and allow a bounded wait for AWS retries. Exhaustion blocks evidence writes and content release in enforce mode. Archive evidence to protected storage and preserve its independent checkpoint before removing local history. The application never silently deletes or rotates security evidence. Apply a filesystem quota as an additional deployment limit for external writers and unmanaged files.
+
+Monitor mode still routes recommended reviews and blocks to their appropriate queues. Block or critical risk uses L3. Evidence is finalized after review and incident failures; required signing or remote audit failures appear as a blocking verdict in the local audit. If remote delivery succeeds and local persistence subsequently fails, the runtime attempts a remote blocking amendment. A failed amendment cannot be guaranteed during a service outage, so treat incomplete delivery as a failed request and reconcile the protected remote receipt. This is not an atomic transaction across local storage, KMS and S3.
 
 Privacy-safe metrics:
 
@@ -325,3 +331,7 @@ If policy integrity, audit integrity, or credential exposure is suspected:
 4. Revoke the runtime role and delete unneeded credentials.
 5. Remove local runtime state through the organization's approved secure process.
 6. Retain or destroy KMS keys only under an approved records-management decision.
+
+Review and incident packets are explicitly marked `before_evidence_delivery`. Their current actions describe that stage, because delivery failures can strengthen the final verdict. The final audit contains their canonical SHA-256 hashes and a shared `audit_correlation_id`; use the final audit for the authoritative action. A missing final audit means the request did not complete successfully.
+
+Release evidence and checksums establish consistency, not provenance. Authenticate downloaded distributions with `gh attestation verify` against the exact repository, source digest, tag and signer workflow. The evidence generator compares archive contents to the supplied source tree but does not independently authenticate the caller-supplied commit label. These unreleased changes are not included in the existing published v4.1.1 package.

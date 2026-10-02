@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import secrets
+import stat
 import sys
 import tempfile
 import threading
@@ -52,6 +53,8 @@ MAX_POLICY_BYTES = 1_048_576
 MAX_JSON_DEPTH = 12
 MAX_AUDIT_LINE_BYTES = 1_048_576
 LOCK_TIMEOUT_SECONDS = 5.0
+MAX_EVIDENCE_BYTES = 268_435_456
+MAX_EVIDENCE_FILES = 10_000
 
 logger = logging.getLogger("bedrock_guardrail_firewall")
 
@@ -312,10 +315,28 @@ def _relative_runtime_base() -> Path:
     return Path.cwd() if RUNNING_AS_PACKAGE else BASE_DIR
 
 
-def _resolve_path(raw: str | os.PathLike[str] | None, default: Path) -> Path:
+def _reject_path_links(path: Path) -> None:
+    for component in (path, *path.parents):
+        try:
+            info = component.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or (
+            os.name == "nt"
+            and getattr(info, "st_file_attributes", 0)
+            & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise ConfigurationError("Privacy key directory must not use links")
+
+
+def _resolve_path(
+    raw: str | os.PathLike[str] | None, default: Path, *, reject_links: bool = False
+) -> Path:
     path = Path(raw) if raw else default
     if not path.is_absolute():
         path = _relative_runtime_base() / path
+    if reject_links:
+        _reject_path_links(path)
     return path.resolve(strict=False)
 
 
@@ -564,6 +585,7 @@ class RuntimeConfig:
             data_dir=_resolve_path(
                 data_dir or os.environ.get("GUARDRAIL_DATA_DIR"),
                 _relative_runtime_base() / ".guardrail-data",
+                reject_links=True,
             ),
             profile_name=(
                 profile_name or os.environ.get("GUARDRAIL_POLICY_PROFILE", "balanced")
@@ -825,7 +847,136 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
     if nested_quantifier.search(pattern):
         raise ConfigurationError(f"{field_name} contains a nested quantifier")
     try:
-        re.compile(pattern, re.IGNORECASE | re.DOTALL)
+        compiled = re.compile(pattern, re.IGNORECASE | re.DOTALL)
+        # A repeated compound expression can backtrack exponentially even without
+        # nested quantifiers. Limit repetition to one character-class atom.
+        try:
+            from re import _parser
+        except ImportError:  # Python 3.10 keeps the parser in its legacy module.
+            import sre_parse as _parser
+
+        def matches_literal(atom, codepoint):
+            op, value = atom
+            character = chr(codepoint)
+            if op == _parser.LITERAL:
+                return chr(value).casefold() == character.casefold()
+            if op == _parser.NOT_LITERAL:
+                return chr(value).casefold() != character.casefold()
+            if op == _parser.ANY:
+                return True
+            if op == _parser.IN:
+                if any(item[0] == _parser.NEGATE for item in value):
+                    return True
+                return any(matches_literal(item, codepoint) for item in value)
+            if op == _parser.RANGE:
+                return any(
+                    len(form) == 1 and value[0] <= ord(form) <= value[1]
+                    for form in (character, character.lower(), character.upper())
+                )
+            if op == _parser.CATEGORY:
+                category = str(value)
+                if category == "CATEGORY_SPACE":
+                    return character.isspace()
+                if category == "CATEGORY_DIGIT":
+                    return character.isdecimal()
+                if category == "CATEGORY_WORD":
+                    return character.isalnum() or character == "_"
+            return True
+
+        def finite_literals(atom):
+            op, value = atom
+            if op == _parser.LITERAL:
+                return {value}
+            if op == _parser.RANGE and value[1] - value[0] <= 256:
+                return set(range(value[0], value[1] + 1))
+            if op == _parser.IN:
+                values = [finite_literals(item) for item in value]
+                if all(item is not None for item in values):
+                    return set().union(*values)
+            return None
+
+        def overlaps(left, right):
+            right_values = finite_literals(right)
+            if right_values is not None:
+                return any(matches_literal(left, item) for item in right_values)
+            left_values = finite_literals(left)
+            if left_values is not None:
+                return any(matches_literal(right, item) for item in left_values)
+            return True
+
+        alternative_budget = 1
+
+        def walk(nodes, pending=None):
+            nonlocal alternative_budget
+            pending = list(pending or [])
+            for op, value in nodes:
+                if str(op) in {"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}:
+                    minimum, maximum, child = value
+                    if maximum > 1:
+                        if len(child) != 1 or child[0][0] not in {
+                            _parser.LITERAL,
+                            _parser.NOT_LITERAL,
+                            _parser.IN,
+                            _parser.CATEGORY,
+                            _parser.ANY,
+                        }:
+                            raise ConfigurationError(
+                                f"{field_name} repeats a compound expression"
+                            )
+                        if any(overlaps(atom, child[0]) for atom in pending):
+                            raise ConfigurationError(
+                                f"{field_name} contains overlapping repetitions"
+                            )
+                        pending = pending + [child[0]] if minimum == 0 else [child[0]]
+                    else:
+                        # Optional atoms also introduce alternative allocations of
+                        # the same input. A long chain of a? followed by a{n} is
+                        # exponential even though no individual repeat exceeds 1.
+                        if minimum == 0:
+                            alternative_budget *= 2
+                            if alternative_budget > 256:
+                                raise ConfigurationError(
+                                    f"{field_name} has too many alternative paths"
+                                )
+                            if len(child) != 1 or child[0][0] not in {
+                                _parser.LITERAL,
+                                _parser.NOT_LITERAL,
+                                _parser.IN,
+                                _parser.CATEGORY,
+                                _parser.ANY,
+                            }:
+                                child_end = walk(child, pending)
+                                pending += child_end
+                                continue
+                            if any(overlaps(atom, child[0]) for atom in pending):
+                                raise ConfigurationError(
+                                    f"{field_name} has overlapping optional repeats"
+                                )
+                            pending.append(child[0])
+                            continue
+                        child_end = walk(child, pending)
+                        pending = pending + child_end if minimum == 0 else child_end
+                elif op == _parser.SUBPATTERN:
+                    pending = walk(value[-1], pending)
+                elif op == _parser.BRANCH:
+                    alternative_budget *= len(value[1])
+                    if alternative_budget > 256:
+                        raise ConfigurationError(
+                            f"{field_name} has too many alternative paths"
+                        )
+                    pending = [
+                        atom for branch in value[1] for atom in walk(branch, pending)
+                    ]
+                elif op == _parser.LITERAL:
+                    pending = [atom for atom in pending if matches_literal(atom, value)]
+                elif str(op) in {"ASSERT", "ASSERT_NOT", "GROUPREF", "GROUPREF_EXISTS"}:
+                    raise ConfigurationError(
+                        f"{field_name} contains an unsupported assertion or reference"
+                    )
+                pending = list({repr(atom): atom for atom in pending}.values())
+            return pending
+
+        walk(_parser.parse(compiled.pattern, compiled.flags))
     except re.error as exc:
         raise ConfigurationError(
             f"{field_name} contains an invalid regular expression"
@@ -1183,6 +1334,202 @@ class EvaluationContext:
     subject_id: str = "anonymous"
 
 
+def _open_private_key(path: Path, *, create: bool) -> int:
+    if os.name != "nt":
+        flags = os.O_RDWR | os.O_NOFOLLOW
+        if create:
+            flags |= os.O_CREAT | os.O_EXCL
+        return os.open(path, flags, 0o600)
+    # Protect the key before its first byte is written. Validate the descriptor
+    # of the opened handle, not a path that another process could replace.
+    import ctypes
+    import ctypes.wintypes as wintypes
+    import msvcrt
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    advapi.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi.ConvertSidToStringSidW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.LPWSTR),
+    ]
+    token = wintypes.HANDLE()
+    if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 8, ctypes.byref(token)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        needed = wintypes.DWORD()
+        advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+        if not 1 <= needed.value <= 65536:
+            raise ConfigurationError("Invalid Windows token length")
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not advapi.GetTokenInformation(
+            token, 1, buffer, needed, ctypes.byref(needed)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        owner_sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+        sid_text = wintypes.LPWSTR()
+        if not advapi.ConvertSidToStringSidW(owner_sid, ctypes.byref(sid_text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            sid = sid_text.value
+        finally:
+            kernel.LocalFree(ctypes.cast(sid_text, ctypes.c_void_p))
+    finally:
+        kernel.CloseHandle(token)
+    if not sid or not re.fullmatch(r"S-1-(?:\d+-)*\d+", sid):
+        raise ConfigurationError("Unable to establish privacy key owner")
+    expected = f"O:{sid}D:P(A;;FA;;;{sid})"
+
+    class Attributes(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.DWORD),
+            ("descriptor", ctypes.c_void_p),
+            ("inherit", wintypes.BOOL),
+        ]
+
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(Attributes),
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi.GetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    advapi.EqualSid.restype = wintypes.BOOL
+    advapi.GetSecurityDescriptorControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi.GetAce.argtypes = [
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+
+    class AclHeader(ctypes.Structure):
+        _fields_ = [
+            ("revision", ctypes.c_ubyte),
+            ("unused", ctypes.c_ubyte),
+            ("size", wintypes.WORD),
+            ("count", wintypes.WORD),
+            ("unused2", wintypes.WORD),
+        ]
+
+    descriptor = ctypes.c_void_p()
+    if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        expected, 1, ctypes.byref(descriptor), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    attributes = Attributes(ctypes.sizeof(Attributes), descriptor, False)
+    try:
+        handle = kernel.CreateFileW(
+            str(path),
+            0xC0020000,
+            3,
+            ctypes.byref(attributes) if create else None,
+            1 if create else 3,
+            0x00200000,
+            None,
+        )
+    finally:
+        kernel.LocalFree(descriptor)
+    if handle == wintypes.HANDLE(-1).value:
+        error = ctypes.get_last_error()
+        if create and error in {80, 183}:
+            raise FileExistsError(str(path))
+        raise ctypes.WinError(error)
+    try:
+        loaded = ctypes.c_void_p()
+        owner = ctypes.c_void_p()
+        dacl = ctypes.c_void_p()
+        error = advapi.GetSecurityInfo(
+            handle,
+            1,
+            5,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(loaded),
+        )
+        if error:
+            raise ctypes.WinError(error)
+        try:
+            control, revision = wintypes.WORD(), wintypes.DWORD()
+            if not advapi.GetSecurityDescriptorControl(
+                loaded, ctypes.byref(control), ctypes.byref(revision)
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if (
+                not owner
+                or not advapi.EqualSid(owner, owner_sid)
+                or not dacl
+                or not (control.value & 0x1000)
+            ):
+                raise ConfigurationError("Privacy key owner or protected ACL is unsafe")
+            header = ctypes.cast(dacl, ctypes.POINTER(AclHeader)).contents
+            if header.count != 1:
+                raise ConfigurationError("Privacy key ACL must grant only its owner")
+            ace = ctypes.c_void_p()
+            if not advapi.GetAce(dacl, 0, ctypes.byref(ace)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            ace_bytes = ctypes.cast(ace, ctypes.POINTER(ctypes.c_ubyte))
+            mask = ctypes.c_uint32.from_address(ace.value + 4).value
+            if (
+                ace_bytes[0] != 0
+                or ace_bytes[1] != 0
+                or mask != 0x001F01FF
+                or not (advapi.EqualSid(ctypes.c_void_p(ace.value + 8), owner_sid))
+            ):
+                raise ConfigurationError(
+                    "Privacy key ACL does not grant owner-only access"
+                )
+        finally:
+            kernel.LocalFree(loaded)
+        fd = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
+        handle = None
+        return fd
+    finally:
+        if handle is not None:
+            kernel.CloseHandle(handle)
+
+
 class PrivacyKey:
     def __init__(self, data_dir: Path, injected_key: bytes | None = None):
         self.path = data_dir / "privacy.key"
@@ -1192,23 +1539,46 @@ class PrivacyKey:
             raise ConfigurationError("Privacy HMAC key must contain at least 32 bytes")
 
     def _load_or_create(self) -> bytes:
+        _reject_path_links(self.path.parent)
         lock_path = self.path.parent / "locks" / "privacy-key.lock"
         with CrossProcessFileLock(lock_path):
-            if self.path.exists():
+            try:
+                created = False
                 try:
-                    encoded = self.path.read_text(encoding="ascii").strip()
+                    fd = _open_private_key(self.path, create=True)
+                    created = True
+                except FileExistsError:
+                    fd = _open_private_key(self.path, create=False)
+                with os.fdopen(fd, "r+b") as handle:
+                    info = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise ConfigurationError(
+                            "Privacy key must be a single regular file"
+                        )
+                    if os.name != "nt" and (
+                        info.st_uid != os.getuid() or info.st_mode & 0o077
+                    ):
+                        raise ConfigurationError(
+                            "Privacy key ownership or permissions are unsafe"
+                        )
+                    if created:
+                        handle.write(
+                            base64.urlsafe_b64encode(secrets.token_bytes(32)) + b"\n"
+                        )
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                        handle.seek(0)
+                    encoded = handle.read(1025)
+                    if len(encoded) > 1024:
+                        raise ConfigurationError("Privacy key file is too large")
                     key = base64.b64decode(
-                        encoded.encode("ascii"), altchars=b"-_", validate=True
+                        encoded.strip(), altchars=b"-_", validate=True
                     )
-                except (OSError, ValueError) as exc:
-                    raise ConfigurationError(
-                        "Unable to load the local privacy key"
-                    ) from exc
                 return key
-            key = secrets.token_bytes(32)
-            encoded = base64.urlsafe_b64encode(key) + b"\n"
-            _write_restricted(self.path, encoded)
-            return key
+            except (OSError, ValueError) as exc:
+                raise ConfigurationError(
+                    "Unable to load the local privacy key safely"
+                ) from exc
 
     def digest(self, value: str, *, length: int = 64) -> str:
         digest = hmac.new(self.key, value.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -1290,14 +1660,15 @@ REGEX_RECOGNIZERS = (
     RegexRecognizer(
         "AWS_SECRET_ACCESS_KEY",
         re.compile(
-            r"\baws_secret_access_key\b\s*[:=]\s*['\"]?[A-Za-z0-9/+=]{40}['\"]?",
+            r"\b(?:aws_secret_access_key|SecretAccessKey|AWSSecretAccessKey)\b"
+            r"['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9/+=]{40}['\"]?",
             re.IGNORECASE,
         ),
         0.99,
     ),
     RegexRecognizer(
         "GITHUB_TOKEN",
-        re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,255}\b"),
+        re.compile(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,255}\b"),
         0.99,
     ),
     RegexRecognizer(
@@ -2081,6 +2452,64 @@ class BedrockGuardrailAdapter:
     ) -> AwsGuardrailResult:
         if not isinstance(response, Mapping):
             raise ExternalServiceError("AWS guardrail returned an invalid response")
+        if response.get("action") not in {"NONE", "GUARDRAIL_INTERVENED"}:
+            raise ExternalServiceError("AWS guardrail returned an unknown action")
+        for name in ("assessments", "outputs"):
+            if not isinstance(response.get(name), list) or any(
+                not isinstance(item, dict) for item in response[name]
+            ):
+                raise ExternalServiceError(
+                    "AWS guardrail returned an invalid collection"
+                )
+        if not isinstance(response.get("usage", {}), Mapping):
+            raise ExternalServiceError("AWS guardrail returned invalid usage")
+        policy_collections = {
+            "topicPolicy": {"topics"},
+            "contentPolicy": {"filters"},
+            "wordPolicy": {"customWords", "managedWordLists"},
+            "sensitiveInformationPolicy": {"piiEntities", "regexes"},
+            "contextualGroundingPolicy": {"filters"},
+            "automatedReasoningPolicy": {"findings"},
+        }
+        for assessment in response["assessments"]:
+            if not assessment or set(assessment) - (
+                set(policy_collections)
+                | {"invocationMetrics", "appliedGuardrailDetails"}
+            ):
+                raise ExternalServiceError("AWS guardrail returned unknown assessment")
+            for name, collections in policy_collections.items():
+                if name not in assessment:
+                    continue
+                policy = assessment[name]
+                if (
+                    not isinstance(policy, dict)
+                    or not policy
+                    or set(policy) - collections
+                ):
+                    raise ExternalServiceError("AWS guardrail returned invalid policy")
+                for collection in policy.values():
+                    if not isinstance(collection, list) or any(
+                        not isinstance(item, dict) for item in collection
+                    ):
+                        raise ExternalServiceError(
+                            "AWS guardrail returned invalid findings"
+                        )
+                    for item in collection:
+                        if name != "automatedReasoningPolicy" and (
+                            item.get("action") not in {"NONE", "BLOCKED", "ANONYMIZED"}
+                            or (
+                                "detected" in item
+                                and not isinstance(item["detected"], bool)
+                            )
+                        ):
+                            raise ExternalServiceError(
+                                "AWS guardrail returned invalid finding action"
+                            )
+            for name in ("invocationMetrics", "appliedGuardrailDetails"):
+                if name in assessment and not isinstance(assessment[name], dict):
+                    raise ExternalServiceError(
+                        "AWS guardrail returned invalid metadata"
+                    )
         detections = cls._assessment_detections(
             response.get("assessments", []), field_name
         )
@@ -2095,7 +2524,16 @@ class BedrockGuardrailAdapter:
         ):
             action = _max_action(action, GuardrailAction.BLOCK)
         sanitized_text = None
-        if action == GuardrailAction.SANITIZE and outputs:
+        if action == GuardrailAction.SANITIZE:
+            if (
+                response["action"] != "GUARDRAIL_INTERVENED"
+                or not outputs
+                or any(
+                    set(item) != {"text"} or not isinstance(item["text"], str)
+                    for item in outputs
+                )
+            ):
+                raise ExternalServiceError("AWS guardrail omitted transformed content")
             sanitized_text = "\n".join(
                 str(item.get("text", "")) for item in outputs if isinstance(item, dict)
             )
@@ -2382,6 +2820,64 @@ class MetricsStore:
         }
 
 
+@contextlib.contextmanager
+def _evidence_budget(data_dir: Path, added_bytes: int, added_files: int = 1):
+    """Reserve evidence capacity without holding the quota lock during I/O."""
+    lock = data_dir / "locks" / "evidence-budget.lock"
+    reservations = data_dir / ".evidence-reservations"
+    reservations.mkdir(parents=True, exist_ok=True)
+    if reservations.is_symlink():
+        raise StorageError("Evidence reservation directory must not use links")
+    reservation = reservations / f"{uuid.uuid4().hex}.json"
+    with CrossProcessFileLock(lock):
+        used_bytes = used_files = 0
+        for name in ("audit", "reviews", "incidents", ".evidence-reservations"):
+            directory = data_dir / name
+            if directory.is_symlink():
+                raise StorageError("Evidence directory must not be a symbolic link")
+            if not directory.exists():
+                continue
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if not entry.is_file(follow_symlinks=False):
+                        raise StorageError("Unexpected entry in evidence directory")
+                    used_files += 1
+                    used_bytes += entry.stat(follow_symlinks=False).st_size
+                    if name == ".evidence-reservations":
+                        pending = _load_json_file(Path(entry.path), maximum_bytes=1024)
+                        if not isinstance(pending, dict) or any(
+                            not isinstance(pending.get(key), int)
+                            or isinstance(pending[key], bool)
+                            or pending[key] < 0
+                            for key in ("bytes", "files")
+                        ):
+                            raise StorageError("Evidence reservation is invalid")
+                        used_bytes += pending["bytes"]
+                        used_files += pending["files"]
+                    if used_files + added_files + 1 > MAX_EVIDENCE_FILES or (
+                        used_bytes + added_bytes + 512 > MAX_EVIDENCE_BYTES
+                    ):
+                        raise StorageError(
+                            "Evidence quota exhausted; archive evidence before retrying"
+                        )
+        if (
+            added_bytes + 512 > MAX_EVIDENCE_BYTES
+            or added_files + 1 > MAX_EVIDENCE_FILES
+        ):
+            raise StorageError("Evidence exceeds the configured quota")
+        _atomic_json_write(
+            reservation, {"bytes": added_bytes, "files": added_files}, create_only=True
+        )
+    try:
+        yield
+    finally:
+        try:
+            with CrossProcessFileLock(lock):
+                reservation.unlink()
+        except OSError as exc:
+            raise StorageError("Unable to release evidence reservation") from exc
+
+
 class AuditStore:
     def __init__(self, config: RuntimeConfig, provider: AwsClientProvider):
         self.config = config
@@ -2411,6 +2907,17 @@ class AuditStore:
                 r"[0-9a-f]{64}", record_hash
             ):
                 raise StorageError("The audit chain head has an invalid hash")
+            core = {
+                key: value
+                for key, value in record.items()
+                if key not in {"record_hash", "kms_signature", "kms_signing_algorithm"}
+            }
+            if record_hash != _sha256_bytes(_canonical_json(core)):
+                raise StorageError("The audit tail does not match its content")
+            if (
+                "kms_signature" in record or self.config.audit_signature_required
+            ) and not (self._verify_signature(record, record_hash)):
+                raise StorageError("The audit tail signature is not authentic")
             return record_hash
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise StorageError("Unable to recover the audit chain head") from exc
@@ -2429,6 +2936,27 @@ class AuditStore:
             return signature, None
         except Exception as exc:
             return None, _safe_error_type(exc)
+
+    def _verify_signature(self, record: Mapping[str, Any], digest: str) -> bool:
+        try:
+            if self.config.aws_mode != "live" or not self.config.audit_signing_key_id:
+                return False
+            if (
+                record.get("kms_signing_algorithm")
+                != self.config.audit_signing_algorithm
+            ):
+                return False
+            signature = base64.b64decode(record["kms_signature"], validate=True)
+            response = self.provider.client("kms").verify(
+                KeyId=self.config.audit_signing_key_id,
+                Message=bytes.fromhex(digest),
+                MessageType="DIGEST",
+                Signature=signature,
+                SigningAlgorithm=self.config.audit_signing_algorithm,
+            )
+            return response.get("SignatureValid") is True
+        except Exception:
+            return False
 
     def _remote_write(self, record: Mapping[str, Any]) -> tuple[str | None, str | None]:
         if not self.config.audit_bucket or self.config.aws_mode != "live":
@@ -2462,16 +2990,49 @@ class AuditStore:
 
     def write(self, event: Mapping[str, Any]) -> dict[str, Any]:
         self.audit_dir.mkdir(parents=True, exist_ok=True)
-        with CrossProcessFileLock(self.lock_path):
+        with (
+            _evidence_budget(self.config.data_dir, MAX_AUDIT_LINE_BYTES, 2),
+            CrossProcessFileLock(self.lock_path, timeout=300),
+        ):
             previous_hash = self._last_event_hash()
             core = dict(event)
             core["previous_hash"] = previous_hash
             digest = _sha256_bytes(_canonical_json(core))
             signature, signing_error = self._kms_signature(digest)
+            if self.config.audit_signature_required and not signature:
+                core["recommended_action"] = GuardrailAction.BLOCK.value
+                if core.get("enforcement_mode") == "enforce":
+                    core["enforced_action"] = GuardrailAction.BLOCK.value
+                core["diagnostics"] = sorted(
+                    set(core.get("diagnostics", []))
+                    | {"required_audit_signature_failed"}
+                )
+                digest = _sha256_bytes(_canonical_json(core))
             record = {**core, "record_hash": digest}
             if signature:
                 record["kms_signature"] = signature
                 record["kms_signing_algorithm"] = self.config.audit_signing_algorithm
+            remote_location, remote_error = self._remote_write(record)
+            if self.config.remote_audit_required and not remote_location:
+                core["recommended_action"] = GuardrailAction.BLOCK.value
+                if core.get("enforcement_mode") == "enforce":
+                    core["enforced_action"] = GuardrailAction.BLOCK.value
+                core["diagnostics"] = sorted(
+                    set(core.get("diagnostics", [])) | {"required_remote_audit_failed"}
+                )
+                digest = _sha256_bytes(_canonical_json(core))
+                signature, signing_error = self._kms_signature(digest)
+                if self.config.audit_signature_required and not signature:
+                    core["diagnostics"] = sorted(
+                        set(core["diagnostics"]) | {"required_audit_signature_failed"}
+                    )
+                    digest = _sha256_bytes(_canonical_json(core))
+                record = {**core, "record_hash": digest}
+                if signature:
+                    record["kms_signature"] = signature
+                    record["kms_signing_algorithm"] = (
+                        self.config.audit_signing_algorithm
+                    )
             encoded = _canonical_json(record) + b"\n"
             if len(encoded) > MAX_AUDIT_LINE_BYTES:
                 raise StorageError("Audit record exceeds the maximum safe size")
@@ -2490,10 +3051,30 @@ class AuditStore:
                         "updated_at": _utcnow().isoformat(),
                     },
                 )
-            except OSError as exc:
+            except (OSError, StorageError) as exc:
+                if remote_location:
+                    amendment = {
+                        **core,
+                        "event_type": "audit_delivery_failure",
+                        "supersedes_record_hash": digest,
+                        "recommended_action": GuardrailAction.BLOCK.value,
+                    }
+                    if core.get("enforcement_mode") == "enforce":
+                        amendment["enforced_action"] = GuardrailAction.BLOCK.value
+                    amendment["diagnostics"] = sorted(
+                        set(core.get("diagnostics", [])) | {"local_audit_failed"}
+                    )
+                    amendment_digest = _sha256_bytes(_canonical_json(amendment))
+                    amendment["record_hash"] = amendment_digest
+                    correction_signature, _ = self._kms_signature(amendment_digest)
+                    if correction_signature:
+                        amendment["kms_signature"] = correction_signature
+                        amendment["kms_signing_algorithm"] = (
+                            self.config.audit_signing_algorithm
+                        )
+                    self._remote_write(amendment)
                 raise StorageError("Unable to append the local audit event") from exc
 
-        remote_location, remote_error = self._remote_write(record)
         return {
             "record_hash": digest,
             "local_location": str(self.events_path),
@@ -2509,7 +3090,24 @@ class AuditStore:
             ),
         }
 
-    def verify(self) -> dict[str, Any]:
+    def verify(
+        self,
+        *,
+        expected_last_hash: str | None = None,
+        expected_count: int | None = None,
+    ) -> dict[str, Any]:
+        # The checkpoint must come from a separately trusted source, never chain.json.
+        checkpoint_supplied = expected_count is not None
+        if checkpoint_supplied and (
+            isinstance(expected_count, bool)
+            or not isinstance(expected_count, int)
+            or expected_count < 0
+            or (
+                expected_count
+                and not re.fullmatch(r"[0-9a-f]{64}", expected_last_hash or "")
+            )
+        ):
+            raise InputValidationError("Invalid trusted audit checkpoint")
         if not self.events_path.exists():
             if self.chain_path.exists():
                 return {
@@ -2517,13 +3115,23 @@ class AuditStore:
                     "checked": 0,
                     "error": "audit_events_missing",
                 }
-            return {"ok": True, "checked": 0, "message": "No local audit events found."}
+            return {
+                "ok": checkpoint_supplied and expected_count == 0,
+                "integrity_ok": True,
+                "checked": 0,
+                "error": None
+                if checkpoint_supplied and expected_count == 0
+                else "trusted_checkpoint_required",
+            }
         previous_hash: str | None = None
         checked = 0
         with CrossProcessFileLock(self.lock_path):
             try:
                 with self.events_path.open("rb") as handle:
-                    for line_number, raw_line in enumerate(handle, start=1):
+                    for line_number, raw_line in enumerate(
+                        iter(lambda: handle.readline(MAX_AUDIT_LINE_BYTES + 1), b""),
+                        start=1,
+                    ):
                         if len(raw_line) > MAX_AUDIT_LINE_BYTES:
                             return {
                                 "ok": False,
@@ -2561,6 +3169,16 @@ class AuditStore:
                                 "error": "record_hash_mismatch",
                                 "line": line_number,
                             }
+                        if (
+                            "kms_signature" in record
+                            or self.config.audit_signature_required
+                        ) and not (self._verify_signature(record, expected_hash)):
+                            return {
+                                "ok": False,
+                                "checked": checked,
+                                "error": "audit_signature_invalid",
+                                "line": line_number,
+                            }
                         previous_hash = supplied_hash
                         checked += 1
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -2591,7 +3209,22 @@ class AuditStore:
                 "checked": checked,
                 "error": "audit_chain_head_mismatch",
             }
-        return {"ok": True, "checked": checked, "last_hash": previous_hash}
+        matches = (
+            checkpoint_supplied
+            and expected_count == checked
+            and (expected_last_hash == previous_hash)
+        )
+        return {
+            "ok": matches,
+            "integrity_ok": True,
+            "checked": checked,
+            "last_hash": previous_hash,
+            "error": None
+            if matches
+            else "trusted_checkpoint_mismatch"
+            if checkpoint_supplied
+            else "trusted_checkpoint_required",
+        }
 
 
 class ReviewStore:
@@ -2612,7 +3245,16 @@ class ReviewStore:
         self.local_dir.mkdir(parents=True, exist_ok=True)
         file_id = uuid.uuid4().hex
         local_path = self.local_dir / f"review_{file_id}.json"
-        _atomic_json_write(local_path, payload, create_only=True)
+        with _evidence_budget(
+            self.config.data_dir,
+            len(
+                (
+                    json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+                    + "\n"
+                ).encode("utf-8")
+            ),
+        ):
+            _atomic_json_write(local_path, payload, create_only=True)
         queue_url = {
             "l1": self.config.review_queue_l1,
             "l2": self.config.review_queue_l2,
@@ -2658,7 +3300,16 @@ class IncidentStore:
         self.local_dir.mkdir(parents=True, exist_ok=True)
         file_id = uuid.uuid4().hex
         path = self.local_dir / f"incident_{file_id}.json"
-        _atomic_json_write(path, payload, create_only=True)
+        with _evidence_budget(
+            self.local_dir.parent,
+            len(
+                (
+                    json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+                    + "\n"
+                ).encode("utf-8")
+            ),
+        ):
+            _atomic_json_write(path, payload, create_only=True)
         return str(path)
 
 
@@ -3284,63 +3935,66 @@ class BedrockGuardrailSystem:
         review_status: dict[str, Any] | None = None
         incident_location: str | None = None
         if record:
-            try:
-                audit_status = {
-                    "status": "recorded",
-                    **self.audit.write(self._audit_event(ctx)),
-                }
-            except StorageError:
-                ctx.diagnostics.append("local_audit_failed")
-                ctx.recommended_action = GuardrailAction.BLOCK
-                if self.config.enforcement_mode == "enforce":
-                    ctx.enforced_action = GuardrailAction.BLOCK
-                audit_status = {"status": "failed"}
-            if audit_status.get("remote_required_failed"):
-                ctx.diagnostics.append("required_remote_audit_failed")
-                ctx.recommended_action = GuardrailAction.BLOCK
-                if self.config.enforcement_mode == "enforce":
-                    ctx.enforced_action = GuardrailAction.BLOCK
-            if audit_status.get("signing_required_failed"):
-                ctx.diagnostics.append("required_audit_signature_failed")
-                ctx.recommended_action = GuardrailAction.BLOCK
-                if self.config.enforcement_mode == "enforce":
-                    ctx.enforced_action = GuardrailAction.BLOCK
+            correlation_id = uuid.uuid4().hex
+            evidence_hashes: dict[str, str] = {}
+            evidence_delivery: dict[str, dict[str, Any]] = {}
 
-            metadata_packet = {
-                "schema_version": 1,
-                "request_id_hash": self._request_id_hash(ctx.request_id),
-                "timestamp": _utcnow().isoformat(),
-                "subject_id": ctx.subject_id,
-                "action": ctx.enforced_action.value,
-                "recommended_action": ctx.recommended_action.value,
-                "risk_level": ctx.risk_level.value,
-                "risk_score": ctx.risk_score,
-                "detection_categories": sorted(
-                    {f"{item.detector}:{item.category}" for item in ctx.detections}
-                ),
-                "policy_version": self.bundle.policy_version,
-                "policy_digest": self.bundle.digest,
-                "audit_record_hash": audit_status.get("record_hash"),
-            }
-            if ctx.enforced_action in {
+            def metadata_packet() -> dict[str, Any]:
+                # Delivery can change the verdict. These are explicitly staged
+                # snapshots, bound by content hash from the authoritative audit.
+                return {
+                    "schema_version": 1,
+                    "request_id_hash": self._request_id_hash(ctx.request_id),
+                    "timestamp": _utcnow().isoformat(),
+                    "subject_id": ctx.subject_id,
+                    "action": ctx.enforced_action.value,
+                    "recommended_action": ctx.recommended_action.value,
+                    "risk_level": ctx.risk_level.value,
+                    "risk_score": ctx.risk_score,
+                    "detection_categories": sorted(
+                        {f"{item.detector}:{item.category}" for item in ctx.detections}
+                    ),
+                    "policy_version": self.bundle.policy_version,
+                    "policy_digest": self.bundle.digest,
+                    "audit_correlation_id": correlation_id,
+                    "decision_phase": "before_evidence_delivery",
+                }
+
+            if ctx.recommended_action in {
                 GuardrailAction.REVIEW,
                 GuardrailAction.ESCALATE,
                 GuardrailAction.BLOCK,
             }:
                 try:
-                    incident_location = self.incidents.create(metadata_packet)
+                    packet = metadata_packet()
+                    evidence_hashes["incident"] = hashlib.sha256(
+                        _canonical_json(packet)
+                    ).hexdigest()
+                    evidence_delivery["incident"] = {"status": "failed_or_ambiguous"}
+                    incident_location = self.incidents.create(packet)
+                    evidence_delivery["incident"] = {"status": "recorded"}
                 except StorageError:
                     ctx.diagnostics.append("incident_storage_failed")
                     ctx.recommended_action = GuardrailAction.BLOCK
                     if self.config.enforcement_mode == "enforce":
                         ctx.enforced_action = GuardrailAction.BLOCK
-            if ctx.enforced_action in {
+            if ctx.recommended_action in {
                 GuardrailAction.REVIEW,
                 GuardrailAction.ESCALATE,
+                GuardrailAction.BLOCK,
             }:
-                level = self.reviews.level(ctx.enforced_action, ctx.risk_level)
+                level = self.reviews.level(ctx.recommended_action, ctx.risk_level)
                 try:
-                    review_status = self.reviews.create(metadata_packet, level)
+                    packet = metadata_packet()
+                    evidence_hashes["review"] = hashlib.sha256(
+                        _canonical_json(packet)
+                    ).hexdigest()
+                    evidence_delivery["review"] = {"status": "failed_or_ambiguous"}
+                    review_status = self.reviews.create(packet, level)
+                    evidence_delivery["review"] = {
+                        "status": "recorded",
+                        "remote_sent": bool(review_status.get("remote_sent")),
+                    }
                 except StorageError:
                     ctx.diagnostics.append("review_storage_failed")
                     ctx.recommended_action = GuardrailAction.BLOCK
@@ -3359,6 +4013,35 @@ class BedrockGuardrailSystem:
                 self.metrics.record(ctx.enforced_action, ctx.risk_level, ctx.detections)
             except (StorageError, TypeError, ValueError):
                 ctx.diagnostics.append("noncritical_state_update_failed")
+
+            try:
+                audit_status = {
+                    "status": "recorded",
+                    **self.audit.write(
+                        {
+                            **self._audit_event(ctx),
+                            "audit_correlation_id": correlation_id,
+                            "evidence_packet_hashes": evidence_hashes,
+                            "evidence_delivery": evidence_delivery,
+                        }
+                    ),
+                }
+            except StorageError:
+                ctx.diagnostics.append("local_audit_failed")
+                ctx.recommended_action = GuardrailAction.BLOCK
+                if self.config.enforcement_mode == "enforce":
+                    ctx.enforced_action = GuardrailAction.BLOCK
+                audit_status = {"status": "failed"}
+            if audit_status.get("remote_required_failed"):
+                ctx.diagnostics.append("required_remote_audit_failed")
+                ctx.recommended_action = GuardrailAction.BLOCK
+                if self.config.enforcement_mode == "enforce":
+                    ctx.enforced_action = GuardrailAction.BLOCK
+            if audit_status.get("signing_required_failed"):
+                ctx.diagnostics.append("required_audit_signature_failed")
+                ctx.recommended_action = GuardrailAction.BLOCK
+                if self.config.enforcement_mode == "enforce":
+                    ctx.enforced_action = GuardrailAction.BLOCK
 
         public_audit = {
             "status": audit_status.get("status", "unknown"),
@@ -4064,7 +4747,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "chaos-test", help="Run deterministic offline mutation tests"
     )
     chaos.add_argument("--rounds", type=int, default=50)
-    subparsers.add_parser("verify-audit", help="Verify the local audit hash chain")
+    audit_parser = subparsers.add_parser(
+        "verify-audit",
+        help="Verify audit signatures and a separately trusted checkpoint",
+    )
+    audit_parser.add_argument("--expected-last-hash")
+    audit_parser.add_argument("--expected-count", type=int)
     subparsers.add_parser("metrics-report", help="Show privacy-safe local metrics")
     subparsers.add_parser("policy-template", help="Print a policy template")
     subparsers.add_parser("policy-profiles-template", help="Print a profiles template")
@@ -4183,7 +4871,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(run_chaos_suite(system, args.rounds))
             return EXIT_OK
         if args.command == "verify-audit":
-            result = system.audit.verify()
+            result = system.audit.verify(
+                expected_last_hash=args.expected_last_hash,
+                expected_count=args.expected_count,
+            )
             _print_json(result)
             return EXIT_OK if result["ok"] else EXIT_ERROR
         if args.command == "metrics-report":
