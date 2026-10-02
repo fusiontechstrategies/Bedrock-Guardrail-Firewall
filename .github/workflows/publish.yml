@@ -64,6 +64,19 @@ jobs:
           gh release download "$RELEASE_TAG" --pattern '*.whl' --pattern '*.tar.gz' --dir dist
           gh release download "$RELEASE_TAG" --pattern '*.spdx.json' --pattern 'release-evidence.json' --pattern 'SHA256SUMS.txt' --dir published-evidence
 
+      - name: Authenticate candidate provenance before reading distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for asset in dist/*; do
+            gh attestation verify "$asset" \
+              --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/release-candidate.yml" \
+              --source-ref "refs/tags/$RELEASE_TAG" \
+              --source-digest "$RELEASE_COMMIT" \
+              --deny-self-hosted-runners
+          done
+
       - name: Rebuild and compare integrity evidence
         shell: bash
         run: |

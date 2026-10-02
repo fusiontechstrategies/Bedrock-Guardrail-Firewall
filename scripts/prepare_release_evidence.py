@@ -331,6 +331,7 @@ def validate_wheel(
     path: Path,
     version: str,
     expected_dependencies: list[dict[str, str]],
+    source_root: Path | None = None,
 ) -> list[dict[str, str]]:
     metadata_values: list[bytes] = []
     record_values: list[tuple[str, bytes]] = []
@@ -369,6 +370,35 @@ def validate_wheel(
                 continue
             value = archive.read(member)
             file_values[name] = value
+            if source_root is not None:
+                if name in required_members:
+                    require(
+                        value == (source_root / name.split("/", 1)[1]).read_bytes(),
+                        f"Wheel source differs from reviewed source: {name!r}",
+                    )
+                else:
+                    metadata_prefix = f"{ARCHIVE_NAME}-{version}.dist-info/"
+                    allowed_metadata = {
+                        "METADATA",
+                        "WHEEL",
+                        "RECORD",
+                        "entry_points.txt",
+                        "top_level.txt",
+                        "licenses/LICENSE",
+                        "licenses/NOTICE",
+                    }
+                    require(
+                        name.startswith(metadata_prefix)
+                        and name[len(metadata_prefix) :] in allowed_metadata,
+                        f"Wheel contains an unreviewed member: {name!r}",
+                    )
+                    if name.endswith("/entry_points.txt"):
+                        require(
+                            value.decode("utf-8").strip()
+                            == "[console_scripts]\nbedrock-guardrail-firewall = "
+                            "bedrock_guardrail_firewall.orchestrator:main",
+                            "Wheel contains unexpected installation entry points",
+                        )
             if member.filename.endswith(".dist-info/METADATA"):
                 metadata_values.append(value)
             if member.filename.endswith(".dist-info/RECORD"):
@@ -435,7 +465,7 @@ def validate_wheel(
     return dependencies
 
 
-def validate_sdist(path: Path, version: str) -> None:
+def validate_sdist(path: Path, version: str, source_root: Path | None = None) -> None:
     expected_root = f"{ARCHIVE_NAME}-{version}"
     metadata_values: list[bytes] = []
     names: set[str] = set()
@@ -464,6 +494,39 @@ def validate_sdist(path: Path, version: str) -> None:
                 member.isfile() or member.isdir(),
                 f"Source distribution contains a link or device: {member.name!r}",
             )
+            if source_root is not None and member.isfile():
+                relative = "/".join(parts[1:])
+                if relative.endswith((".py", ".pth")) or relative in {
+                    "pyproject.toml",
+                    "setup.cfg",
+                    "setup.py",
+                    "guardrail_policy.json",
+                    "guardrail_policy_profiles.json",
+                    "__init__.py",
+                    "py.typed",
+                }:
+                    handle = archive.extractfile(member)
+                    require(handle is not None, "Unable to read source member")
+                    value = handle.read()
+                    if (
+                        relative == "setup.cfg"
+                        and not (source_root / relative).exists()
+                    ):
+                        require(
+                            value.replace(b"\r\n", b"\n").strip()
+                            == b"[egg_info]\ntag_build = \ntag_date = 0",
+                            "Source distribution contains unexpected "
+                            "build configuration",
+                        )
+                    else:
+                        reviewed = source_root / relative
+                        require(
+                            reviewed.is_file()
+                            and not reviewed.is_symlink()
+                            and value == reviewed.read_bytes(),
+                            "Source distribution differs from reviewed source: "
+                            f"{relative!r}",
+                        )
             if len(parts) == 2 and parts[-1] == "PKG-INFO":
                 handle = archive.extractfile(member)
                 require(handle is not None, "Unable to read source PKG-INFO")
@@ -472,6 +535,22 @@ def validate_sdist(path: Path, version: str) -> None:
         len(metadata_values) == 1,
         "Source distribution must contain exactly one top-level PKG-INFO",
     )
+    if source_root is not None:
+        required_source = {
+            f"{expected_root}/{name}"
+            for name in (
+                "__init__.py",
+                "orchestrator.py",
+                "guardrail_policy.json",
+                "guardrail_policy_profiles.json",
+                "py.typed",
+                "pyproject.toml",
+            )
+        }
+        require(
+            required_source.issubset(names),
+            "Source distribution is missing reviewed source",
+        )
     metadata = parse_metadata(metadata_values[0], path.name)
     require(metadata["Version"] == version, "Source metadata version mismatch")
 
@@ -619,10 +698,10 @@ def prepare_release_evidence(
     wheel = next(path for path in artifacts if path.suffix == ".whl")
     sdist = next(path for path in artifacts if path.name.endswith(".tar.gz"))
     dependencies = [
-        *validate_wheel(wheel, version, expected_dependencies),
+        *validate_wheel(wheel, version, expected_dependencies, source_root),
         *direct_wheel_dependencies,
     ]
-    validate_sdist(sdist, version)
+    validate_sdist(sdist, version, source_root)
 
     records = [
         {

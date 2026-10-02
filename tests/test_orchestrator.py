@@ -1267,7 +1267,9 @@ class AuditAndStateTests(GuardrailTestCase):
         system = self.make_system()
         system.process("First safe request.", {})
         system.process("Second safe request.", {})
-        verification = system.audit.verify()
+        verification = system.audit.verify(
+            expected_last_hash=system.audit._last_event_hash(), expected_count=2
+        )
         self.assertTrue(verification["ok"])
         self.assertEqual(verification["checked"], 2)
 
@@ -1329,7 +1331,7 @@ class AuditAndStateTests(GuardrailTestCase):
 
     def test_empty_audit_chain_verifies(self):
         system = self.make_system()
-        verification = system.audit.verify()
+        verification = system.audit.verify(expected_count=0)
         self.assertTrue(verification["ok"])
         self.assertEqual(verification["checked"], 0)
 
@@ -1754,7 +1756,7 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("between 1 and 10000", stderr)
 
     def test_verify_empty_audit_command(self):
-        code, stdout, _ = self.run_main(["verify-audit"])
+        code, stdout, _ = self.run_main(["verify-audit", "--expected-count", "0"])
         self.assertEqual(code, app.EXIT_OK)
         self.assertTrue(json.loads(stdout)["ok"])
 

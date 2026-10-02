@@ -35,6 +35,35 @@ Provides-Extra: presidio
 
 
 class ReleaseEvidenceTests(unittest.TestCase):
+    def test_wheel_rejects_unreviewed_installation_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_source(root)
+            self.make_distributions(root / "dist")
+            wheel = next((root / "dist").glob("*.whl"))
+            with zipfile.ZipFile(wheel, "a") as archive:
+                archive.writestr("injected.pth", "import injected")
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "unreviewed member"
+            ):
+                release.validate_wheel(
+                    wheel, VERSION, release.parse_optional_dependencies(root), root
+                )
+
+    def test_self_consistent_wheel_cannot_substitute_reviewed_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_source(root)
+            self.make_distributions(root / "dist")
+            (root / "orchestrator.py").write_text("replacement source")
+            wheel = next((root / "dist").glob("*.whl"))
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "differs from reviewed source"
+            ):
+                release.validate_wheel(
+                    wheel, VERSION, release.parse_optional_dependencies(root), root
+                )
+
     def make_source(self, root: Path) -> None:
         (root / "scripts").mkdir()
         (root / "pyproject.toml").write_text(
@@ -44,6 +73,13 @@ class ReleaseEvidenceTests(unittest.TestCase):
         (root / "orchestrator.py").write_text(
             f'__version__ = "{VERSION}"\n', encoding="utf-8"
         )
+        for name in (
+            "__init__.py",
+            "guardrail_policy.json",
+            "guardrail_policy_profiles.json",
+            "py.typed",
+        ):
+            (root / name).write_bytes(b"synthetic")
         (root / "scripts" / "validate_installed_package.py").write_text(
             f'EXPECTED_VERSION = "{VERSION}"\n', encoding="utf-8"
         )
@@ -68,7 +104,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
         wheel = dist / f"bedrock_guardrail_firewall-{VERSION}-py3-none-any.whl"
         dist_info = f"bedrock_guardrail_firewall-{VERSION}.dist-info"
         wheel_files = {
-            f"bedrock_guardrail_firewall/{name}": b"synthetic"
+            f"bedrock_guardrail_firewall/{name}": (dist.parent / name).read_bytes()
             for name in (
                 "__init__.py",
                 "orchestrator.py",
@@ -95,7 +131,22 @@ class ReleaseEvidenceTests(unittest.TestCase):
         sdist = dist / f"bedrock_guardrail_firewall-{VERSION}.tar.gz"
         with tarfile.open(sdist, mode="w:gz") as archive:
             root = f"bedrock_guardrail_firewall-{VERSION}"
-            for name, value in (("PKG-INFO", METADATA), ("README.md", b"synthetic")):
+            source_files = [
+                (name, (dist.parent / name).read_bytes())
+                for name in (
+                    "__init__.py",
+                    "orchestrator.py",
+                    "guardrail_policy.json",
+                    "guardrail_policy_profiles.json",
+                    "py.typed",
+                    "pyproject.toml",
+                )
+            ]
+            for name, value in [
+                ("PKG-INFO", METADATA),
+                ("README.md", b"synthetic"),
+                *source_files,
+            ]:
                 member = tarfile.TarInfo(f"{root}/{name}")
                 member.size = len(value)
                 archive.addfile(member, io.BytesIO(value))
