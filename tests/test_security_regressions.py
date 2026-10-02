@@ -201,6 +201,12 @@ class SecurityRegressionTests(GuardrailTestCase):
             {"action": "NONE", "assessments": {}},
             {"action": "NONE", "assessments": [], "outputs": [1]},
             {"action": "NONE", "assessments": [{}], "outputs": []},
+            {"action": "NONE", "assessments": [{"topicPolicy": {}}], "outputs": []},
+            {
+                "action": "NONE",
+                "assessments": [{"sensitiveInformationPolicy": {}}],
+                "outputs": [],
+            },
             {"action": "NONE", "assessments": [{"unknownPolicy": {}}], "outputs": []},
             {
                 "action": "NONE",
@@ -265,9 +271,37 @@ class SecurityRegressionTests(GuardrailTestCase):
             try:
                 with self.assertRaises(app.ConfigurationError):
                     app.PrivacyKey(junction)
+                with patch.dict(os.environ, {"GUARDRAIL_DATA_DIR": str(junction)}):
+                    with self.assertRaises(app.ConfigurationError):
+                        app.RuntimeConfig.from_env()
+                with self.assertRaises(app.ConfigurationError):
+                    app.RuntimeConfig.from_env(data_dir=junction)
                 self.assertFalse((target / "privacy.key").exists())
             finally:
                 junction.rmdir()
+
+    def test_materialized_review_with_delivery_error_retains_audit_binding(self):
+        import hashlib
+
+        system = self.make_system()
+        original = system.reviews.create
+
+        def materialize_then_fail(packet, level):
+            original(packet, level)
+            raise app.StorageError("fixture reservation cleanup")
+
+        with patch.object(system.reviews, "create", side_effect=materialize_then_fail):
+            system.process("Synthetic CUI // controlled unclassified information")
+        packet = json.loads(next(system.reviews.local_dir.glob("*.json")).read_text())
+        event = json.loads(system.audit.events_path.read_text().strip())
+        self.assertEqual(
+            event["evidence_delivery"]["review"]["status"], "failed_or_ambiguous"
+        )
+        self.assertEqual(
+            event["evidence_packet_hashes"]["review"],
+            hashlib.sha256(app._canonical_json(packet)).hexdigest(),
+        )
+        self.assertEqual(event["enforced_action"], "block")
 
     def test_compound_repetition_is_rejected_without_evaluation(self):
         for pattern in (

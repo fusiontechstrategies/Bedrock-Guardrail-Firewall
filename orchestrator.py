@@ -315,10 +315,28 @@ def _relative_runtime_base() -> Path:
     return Path.cwd() if RUNNING_AS_PACKAGE else BASE_DIR
 
 
-def _resolve_path(raw: str | os.PathLike[str] | None, default: Path) -> Path:
+def _reject_path_links(path: Path) -> None:
+    for component in (path, *path.parents):
+        try:
+            info = component.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or (
+            os.name == "nt"
+            and getattr(info, "st_file_attributes", 0)
+            & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise ConfigurationError("Privacy key directory must not use links")
+
+
+def _resolve_path(
+    raw: str | os.PathLike[str] | None, default: Path, *, reject_links: bool = False
+) -> Path:
     path = Path(raw) if raw else default
     if not path.is_absolute():
         path = _relative_runtime_base() / path
+    if reject_links:
+        _reject_path_links(path)
     return path.resolve(strict=False)
 
 
@@ -567,6 +585,7 @@ class RuntimeConfig:
             data_dir=_resolve_path(
                 data_dir or os.environ.get("GUARDRAIL_DATA_DIR"),
                 _relative_runtime_base() / ".guardrail-data",
+                reject_links=True,
             ),
             profile_name=(
                 profile_name or os.environ.get("GUARDRAIL_POLICY_PROFILE", "balanced")
@@ -1526,14 +1545,7 @@ class PrivacyKey:
             raise ConfigurationError("Privacy HMAC key must contain at least 32 bytes")
 
     def _load_or_create(self) -> bytes:
-        for parent in (self.path.parent, *self.path.parent.parents):
-            info = parent.lstat()
-            if parent.is_symlink() or (
-                os.name == "nt"
-                and getattr(info, "st_file_attributes", 0)
-                & stat.FILE_ATTRIBUTE_REPARSE_POINT
-            ):
-                raise ConfigurationError("Privacy key directory must not use links")
+        _reject_path_links(self.path.parent)
         lock_path = self.path.parent / "locks" / "privacy-key.lock"
         with CrossProcessFileLock(lock_path):
             try:
@@ -2475,7 +2487,11 @@ class BedrockGuardrailAdapter:
                 if name not in assessment:
                     continue
                 policy = assessment[name]
-                if not isinstance(policy, dict) or set(policy) - collections:
+                if (
+                    not isinstance(policy, dict)
+                    or not policy
+                    or set(policy) - collections
+                ):
                     raise ExternalServiceError("AWS guardrail returned invalid policy")
                 for collection in policy.values():
                     if not isinstance(collection, list) or any(
@@ -3927,6 +3943,7 @@ class BedrockGuardrailSystem:
         if record:
             correlation_id = uuid.uuid4().hex
             evidence_hashes: dict[str, str] = {}
+            evidence_delivery: dict[str, dict[str, Any]] = {}
 
             def metadata_packet() -> dict[str, Any]:
                 # Delivery can change the verdict. These are explicitly staged
@@ -3956,10 +3973,12 @@ class BedrockGuardrailSystem:
             }:
                 try:
                     packet = metadata_packet()
-                    incident_location = self.incidents.create(packet)
                     evidence_hashes["incident"] = hashlib.sha256(
                         _canonical_json(packet)
                     ).hexdigest()
+                    evidence_delivery["incident"] = {"status": "failed_or_ambiguous"}
+                    incident_location = self.incidents.create(packet)
+                    evidence_delivery["incident"] = {"status": "recorded"}
                 except StorageError:
                     ctx.diagnostics.append("incident_storage_failed")
                     ctx.recommended_action = GuardrailAction.BLOCK
@@ -3973,10 +3992,15 @@ class BedrockGuardrailSystem:
                 level = self.reviews.level(ctx.recommended_action, ctx.risk_level)
                 try:
                     packet = metadata_packet()
-                    review_status = self.reviews.create(packet, level)
                     evidence_hashes["review"] = hashlib.sha256(
                         _canonical_json(packet)
                     ).hexdigest()
+                    evidence_delivery["review"] = {"status": "failed_or_ambiguous"}
+                    review_status = self.reviews.create(packet, level)
+                    evidence_delivery["review"] = {
+                        "status": "recorded",
+                        "remote_sent": bool(review_status.get("remote_sent")),
+                    }
                 except StorageError:
                     ctx.diagnostics.append("review_storage_failed")
                     ctx.recommended_action = GuardrailAction.BLOCK
@@ -4004,6 +4028,7 @@ class BedrockGuardrailSystem:
                             **self._audit_event(ctx),
                             "audit_correlation_id": correlation_id,
                             "evidence_packet_hashes": evidence_hashes,
+                            "evidence_delivery": evidence_delivery,
                         }
                     ),
                 }

@@ -8,16 +8,16 @@ This protects real workloads while still validating request construction, respon
 
 ## Completed local baseline
 
-The published source history identifies a 4.0.0 baseline. Version 4.1.0 is published; 4.1.1 is a metadata-correction release candidate. The table records point-in-time local validation and must be refreshed against the exact release commit and artifacts.
+The published source history identifies a 4.0.0 baseline. Version 4.1.0 is published; 4.1.1 is published. These remediation commits are unreleased. The table records point-in-time local validation and must be refreshed against the exact release commit and artifacts.
 
 | Check | Result |
 | --- | --- |
-| Automated unit and integration tests | 217 discovered in the current remediation suite; environment-specific optional checks are also run in dedicated jobs |
-| Branch-aware line coverage | 86 percent |
+| Automated unit and integration tests | 218 discovered in the current remediation suite; environment-specific optional checks are also run in dedicated jobs |
+| Branch-aware line coverage | 85 percent |
 | Built-in self-test | 7 of 7 passed |
 | Built-in adversarial suite | 10 of 10 contained |
 | Deterministic mutation suite | 100 rounds completed |
-| Native Windows Python 3.12 | 215 passed, two optional integrations skipped in the current remediation run; dedicated integration jobs cover installed optional dependencies |
+| Native Windows Python 3.12 | 216 passed, two optional integrations skipped in the current remediation run; dedicated integration jobs cover installed optional dependencies |
 | Windows and Linux Python 3.10 through 3.14 | Configured as a required CI matrix; the exact release commit must pass it before publication |
 | Missing Presidio model package check | Readiness failed before provider construction, download, socket creation, connection, or name resolution |
 | Package validation | Wheel and source distribution built; metadata, isolated install, library import, console entry point, packaged policies, default local state, missing-model failure, and full pinned Presidio initialization passed |
