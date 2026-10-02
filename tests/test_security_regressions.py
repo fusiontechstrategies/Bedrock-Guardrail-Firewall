@@ -122,8 +122,10 @@ class SecurityRegressionTests(GuardrailTestCase):
         for secret in (
             "xapp-1-" + "A" * 32,
             (
-                "-----BEGIN PGP PRIVATE KEY BLOCK-----\n"
-                "Synthetic private armor\n-----END PGP PRIVATE KEY BLOCK-----"
+                "-----BEGIN "
+                + "PGP PRIVATE KEY BLOCK-----\n"
+                + "Synthetic private armor\n-----END "
+                + "PGP PRIVATE KEY BLOCK-----"
             ),
         ):
             for field in ("input", "output", "retrieval"):
