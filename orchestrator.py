@@ -57,6 +57,9 @@ MAX_EVIDENCE_BYTES = 268_435_456
 MAX_EVIDENCE_FILES = 10_000
 MAX_JWT_SEGMENT_CHARS = (4096, 32768, 8192)
 MAX_JWT_HEADER_CANDIDATES = 64
+MAX_OPAQUE_TOKEN_CHARS = 4096
+MAX_OPAQUE_TOKEN_CANDIDATES = 64
+MIN_BARE_BEARER_TOKEN_CHARS = 16
 
 logger = logging.getLogger("bedrock_guardrail_firewall")
 
@@ -697,6 +700,22 @@ class RuntimeConfig:
             .lower(),
         )
         config.validate()
+        return config
+
+    @classmethod
+    def from_lambda_env(cls) -> RuntimeConfig:
+        """Admit Lambda only with deployment-owned durable audit requirements."""
+        config = cls.from_env()
+        if not config.remote_audit_required:
+            raise ConfigurationError(
+                "Lambda requires GUARDRAIL_REMOTE_AUDIT_REQUIRED=true"
+            )
+        # Generic validation already requires an audit bucket and live mode.
+        # A generated /tmp key cannot retain identity across environment recycling.
+        if _privacy_key_from_env() is None:
+            raise ConfigurationError(
+                "Lambda requires an injected stable privacy HMAC key"
+            )
         return config
 
     def validate(self) -> None:
@@ -1705,6 +1724,18 @@ class RegexRecognizer:
 MAX_PRIVACY_FINDINGS = 256
 MAX_PUBLIC_RESPONSE_BYTES = 1_048_576
 
+OPAQUE_TOKEN_LABEL = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    r"(?P<field>access_token|refresh_token)['\"]?\s*[:=]\s*['\"]?"
+    r"|(?P<authorization>authorization['\"]?\s*:\s*['\"]?)?"
+    r"bearer\s+)(?P<value>[^\s'\"&<>,;()\[\]{}]+)",
+    re.IGNORECASE | re.ASCII,
+)
+OPAQUE_TOKEN_ALPHABET = re.compile(r"[A-Za-z0-9._~+/=-]+", re.ASCII)
+OPAQUE_TOKEN_PLACEHOLDERS = frozenset(
+    {"token", "your_token", "your-token", "example-token", "placeholder", "redacted"}
+)
+
 REGEX_RECOGNIZERS = (
     RegexRecognizer(
         "US_SOCIAL_SECURITY_NUMBER", re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)"), 0.85
@@ -1927,6 +1958,46 @@ class PrivacyEngine:
 
     def _regex_findings(self, text: str) -> list[EntityFinding]:
         findings: list[EntityFinding] = []
+        candidates = 0
+        for match in OPAQUE_TOKEN_LABEL.finditer(text):
+            value = match.group("value")
+            if value.lower() in OPAQUE_TOKEN_PLACEHOLDERS:
+                continue
+            if (
+                match.group("field") is None
+                and match.group("authorization") is None
+                and len(value) < MIN_BARE_BEARER_TOKEN_CHARS
+            ):
+                # Bare scheme-like prose (for example bearer bonds) is common.
+                # Explicit credential fields/headers still contain short values.
+                continue
+            if candidates >= MAX_OPAQUE_TOKEN_CANDIDATES:
+                raise InputValidationError("Opaque credential exceeds candidate budget")
+            candidates += 1
+            entity_type = "OPAQUE_TOKEN"
+            if value.count(".") == 2 and _jwt_credential_like(value):
+                # Keep JOSE budgets/policy, covering the complete labelled value
+                # even when padding lies outside the unlabelled JWT regex.
+                entity_type = "JWT"
+            elif len(value) > MAX_OPAQUE_TOKEN_CHARS:
+                raise InputValidationError("Opaque credential exceeds privacy budget")
+            if OPAQUE_TOKEN_ALPHABET.fullmatch(value) is None:
+                raise InputValidationError("Opaque credential has unsupported encoding")
+            findings.append(
+                EntityFinding(
+                    entity_type=entity_type,
+                    start=match.start("value"),
+                    end=match.end("value"),
+                    confidence=0.99,
+                    recognizer=f"regex:labelled_{entity_type.lower()}",
+                    action=self.bundle.entity_actions.get(
+                        entity_type,
+                        GuardrailAction.BLOCK
+                        if entity_type == "OPAQUE_TOKEN"
+                        else GuardrailAction.SANITIZE,
+                    ),
+                )
+            )
         for recognizer in REGEX_RECOGNIZERS:
             for match in recognizer.pattern.finditer(text):
                 if len(findings) >= MAX_PRIVACY_FINDINGS:
@@ -4656,6 +4727,7 @@ def default_policy_template() -> dict[str, Any]:
             "IP_ADDRESS": "sanitize",
             "JWT": "queue_for_review",
             "OPENAI_API_KEY": "block",
+            "OPAQUE_TOKEN": "block",
             "PHONE_NUMBER": "sanitize",
             "PRIVATE_KEY": "block",
             "SLACK_TOKEN": "block",
@@ -4967,6 +5039,9 @@ def lambda_handler(event: Any, context: Any) -> dict[str, Any]:
     del context
     global _LAMBDA_SYSTEM
     try:
+        runtime_config = (
+            RuntimeConfig.from_lambda_env() if _LAMBDA_SYSTEM is None else None
+        )
         if not isinstance(event, dict):
             raise InputValidationError("Lambda event must be an object")
         raw_body = event.get("body", event)
@@ -5021,7 +5096,8 @@ def lambda_handler(event: Any, context: Any) -> dict[str, Any]:
             safe_body_context["request_id"] = body["request_id"]
 
         if _LAMBDA_SYSTEM is None:
-            runtime_config = RuntimeConfig.from_env()
+            if runtime_config is None:
+                raise ConfigurationError("Lambda startup profile is unavailable")
             _LAMBDA_SYSTEM = BedrockGuardrailSystem(
                 runtime_config,
                 live_aws_authorized=runtime_config.aws_mode == "live",

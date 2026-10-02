@@ -114,7 +114,11 @@ class ReleaseEvidenceTests(unittest.TestCase):
     def make_source(self, root: Path) -> None:
         (root / "scripts").mkdir()
         (root / "pyproject.toml").write_text(
-            f'[project]\nname = "bedrock-guardrail-firewall"\nversion = "{VERSION}"\n',
+            f'[project]\nname = "bedrock-guardrail-firewall"\nversion = "{VERSION}"\n'
+            "[project.optional-dependencies]\n"
+            'aws = ["boto3==1.43.82", "botocore==1.43.82"]\n'
+            "presidio = [\"presidio-analyzer==2.2.364; python_version < '3.14'\", "
+            "\"spacy==3.8.16; python_version < '3.14'\"]\n",
             encoding="utf-8",
         )
         (root / "orchestrator.py").write_text(

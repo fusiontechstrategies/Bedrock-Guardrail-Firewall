@@ -1,0 +1,3 @@
+# Release evidence parsers only; the product runtime has no core dependency.
+packaging==26.3
+tomli==2.4.1 ; python_version < "3.11"

@@ -75,8 +75,48 @@ does not verify their signatures, authorize their holders, or validate claims.
 Encoded header, payload, and signature segments are limited to 4,096, 32,768,
 and 8,192 characters respectively. Oversized compact candidates raise a local
 validation error instead of silently bypassing privacy processing.
-Common `access_token=` syntax is recognized. Header suffix checks for hyphen or
-underscore labels are limited to 64 candidates; exhaustion fails closed.
+Header suffix checks for hyphen or underscore labels are limited to 64 candidates;
+exhaustion fails closed.
+
+Opaque credentials are recognized after case-insensitive `access_token` and
+`refresh_token` labels with `=` or `:` separators (including quoted values), and
+after the `Bearer` scheme. Values use ASCII letters, digits, `.`, `_`, `~`, `+`,
+`/`, `=`, and `-`; whitespace, quotes, query `&`, and common field punctuation end
+a value. Each opaque value is limited to 4,096 characters, with at most 64 labelled
+candidates per text field. Oversized values, candidate exhaustion, and unsupported
+characters inside a candidate fail local validation before cloud evaluation.
+The existing Unicode normalization applies before recognition. Compact JOSE
+credentials retain their separate segment limits and policy. The exact obvious
+placeholders `token`, `your_token`, `your-token`, `example-token`, `placeholder`,
+and `redacted` are excluded, case-insensitively. Unlabelled arbitrary strings and
+encoded or split credential formats outside this grammar are not a detection
+guarantee. Recognition contains text; it does not authenticate a credential.
+
+Bare `Bearer` values must be at least 16 characters, so ordinary phrases such as
+`bearer bonds`, `bearer shares`, and `bearer plant` remain unchanged. Explicit
+`Authorization: Bearer` headers (including quoted JSON headers), `access_token`,
+and `refresh_token` fields contain shorter values too. Short bare Bearer values
+are outside the supported grammar; this threshold is not an entropy test.
+Excluded placeholders and short bare prose do not consume the credential-candidate
+budget. The existing text-size limits still bound their linear scan.
+
+Lambda cold startup requires `GUARDRAIL_REMOTE_AUDIT_REQUIRED=true`, a remote
+audit bucket, live AWS mode, and an injected stable privacy HMAC key. Request data
+cannot select a local-only audit profile. Failed required delivery blocks content
+release; this control does not prove that a deployment's S3 retention or IAM policy
+was configured correctly.
+The startup requirement is checked before malformed-event admission. Malformed
+payloads rejected before request processing do not create audit event records.
+
+Release verification parses full PEP 508 requirements and compares complete
+canonical optional markers with reviewed `pyproject.toml` metadata and exact pins.
+Trusted publication verification installs hashed parser pins from the trusted
+default-branch checkout into a fresh virtual environment and runs in isolated mode.
+Only the supported extra equality and reviewed Python-version conjunction are
+admitted; broadened/disjunctive/duplicate predicates are refused. Archive paths
+containing `~` followed by an ASCII digit are conservatively refused in wheels,
+source distributions, and source normalization to exclude Windows short-name
+aliases, independently of host filesystem settings.
 
 Policy identifiers must be unique after the exact normalization used by runtime
 maps. Whitespace collisions are rejected in topic, role, weight, and profile

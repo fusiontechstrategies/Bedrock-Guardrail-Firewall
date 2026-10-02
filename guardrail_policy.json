@@ -53,6 +53,7 @@
     "IBAN_CODE": "sanitize",
     "IP_ADDRESS": "sanitize",
     "JWT": "queue_for_review",
+    "OPAQUE_TOKEN": "block",
     "OPENAI_API_KEY": "block",
     "PHONE_NUMBER": "sanitize",
     "PRIVATE_KEY": "block",
