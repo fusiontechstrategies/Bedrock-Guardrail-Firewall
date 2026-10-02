@@ -885,7 +885,10 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
                 return any(matches_literal(right, item) for item in left_values)
             return True
 
+        optional_count = 0
+
         def walk(nodes, pending=None):
+            nonlocal optional_count
             pending = list(pending or [])
             for op, value in nodes:
                 if str(op) in {"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}:
@@ -907,6 +910,31 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
                             )
                         pending = pending + [child[0]] if minimum == 0 else [child[0]]
                     else:
+                        # Optional atoms also introduce alternative allocations of
+                        # the same input. A long chain of a? followed by a{n} is
+                        # exponential even though no individual repeat exceeds 1.
+                        if minimum == 0:
+                            optional_count += 1
+                            if optional_count > 8:
+                                raise ConfigurationError(
+                                    f"{field_name} has too many optional repeats"
+                                )
+                            if len(child) != 1 or child[0][0] not in {
+                                _parser.LITERAL,
+                                _parser.NOT_LITERAL,
+                                _parser.IN,
+                                _parser.CATEGORY,
+                                _parser.ANY,
+                            }:
+                                child_end = walk(child, pending)
+                                pending += child_end
+                                continue
+                            if any(overlaps(atom, child[0]) for atom in pending):
+                                raise ConfigurationError(
+                                    f"{field_name} has overlapping optional repeats"
+                                )
+                            pending.append(child[0])
+                            continue
                         child_end = walk(child, pending)
                         pending = pending + child_end if minimum == 0 else child_end
                 elif op == _parser.SUBPATTERN:
@@ -1488,7 +1516,12 @@ class PrivacyKey:
 
     def _load_or_create(self) -> bytes:
         for parent in (self.path.parent, *self.path.parent.parents):
-            if parent.is_symlink():
+            info = parent.lstat()
+            if parent.is_symlink() or (
+                os.name == "nt"
+                and getattr(info, "st_file_attributes", 0)
+                & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
                 raise ConfigurationError("Privacy key directory must not use links")
         lock_path = self.path.parent / "locks" / "privacy-key.lock"
         with CrossProcessFileLock(lock_path):
@@ -2413,6 +2446,49 @@ class BedrockGuardrailAdapter:
                 )
         if not isinstance(response.get("usage", {}), Mapping):
             raise ExternalServiceError("AWS guardrail returned invalid usage")
+        policy_collections = {
+            "topicPolicy": {"topics"},
+            "contentPolicy": {"filters"},
+            "wordPolicy": {"customWords", "managedWordLists"},
+            "sensitiveInformationPolicy": {"piiEntities", "regexes"},
+            "contextualGroundingPolicy": {"filters"},
+            "automatedReasoningPolicy": {"findings"},
+        }
+        for assessment in response["assessments"]:
+            if not assessment or set(assessment) - (
+                set(policy_collections)
+                | {"invocationMetrics", "appliedGuardrailDetails"}
+            ):
+                raise ExternalServiceError("AWS guardrail returned unknown assessment")
+            for name, collections in policy_collections.items():
+                if name not in assessment:
+                    continue
+                policy = assessment[name]
+                if not isinstance(policy, dict) or set(policy) - collections:
+                    raise ExternalServiceError("AWS guardrail returned invalid policy")
+                for collection in policy.values():
+                    if not isinstance(collection, list) or any(
+                        not isinstance(item, dict) for item in collection
+                    ):
+                        raise ExternalServiceError(
+                            "AWS guardrail returned invalid findings"
+                        )
+                    for item in collection:
+                        if name != "automatedReasoningPolicy" and (
+                            item.get("action") not in {"NONE", "BLOCKED", "ANONYMIZED"}
+                            or (
+                                "detected" in item
+                                and not isinstance(item["detected"], bool)
+                            )
+                        ):
+                            raise ExternalServiceError(
+                                "AWS guardrail returned invalid finding action"
+                            )
+            for name in ("invocationMetrics", "appliedGuardrailDetails"):
+                if name in assessment and not isinstance(assessment[name], dict):
+                    raise ExternalServiceError(
+                        "AWS guardrail returned invalid metadata"
+                    )
         detections = cls._assessment_detections(
             response.get("assessments", []), field_name
         )
@@ -2427,7 +2503,16 @@ class BedrockGuardrailAdapter:
         ):
             action = _max_action(action, GuardrailAction.BLOCK)
         sanitized_text = None
-        if action == GuardrailAction.SANITIZE and outputs:
+        if action == GuardrailAction.SANITIZE:
+            if (
+                response["action"] != "GUARDRAIL_INTERVENED"
+                or not outputs
+                or any(
+                    set(item) != {"text"} or not isinstance(item["text"], str)
+                    for item in outputs
+                )
+            ):
+                raise ExternalServiceError("AWS guardrail omitted transformed content")
             sanitized_text = "\n".join(
                 str(item.get("text", "")) for item in outputs if isinstance(item, dict)
             )
@@ -3829,29 +3914,41 @@ class BedrockGuardrailSystem:
         review_status: dict[str, Any] | None = None
         incident_location: str | None = None
         if record:
-            metadata_packet = {
-                "schema_version": 1,
-                "request_id_hash": self._request_id_hash(ctx.request_id),
-                "timestamp": _utcnow().isoformat(),
-                "subject_id": ctx.subject_id,
-                "action": ctx.enforced_action.value,
-                "recommended_action": ctx.recommended_action.value,
-                "risk_level": ctx.risk_level.value,
-                "risk_score": ctx.risk_score,
-                "detection_categories": sorted(
-                    {f"{item.detector}:{item.category}" for item in ctx.detections}
-                ),
-                "policy_version": self.bundle.policy_version,
-                "policy_digest": self.bundle.digest,
-                "audit_record_hash": audit_status.get("record_hash"),
-            }
+            correlation_id = uuid.uuid4().hex
+            evidence_hashes: dict[str, str] = {}
+
+            def metadata_packet() -> dict[str, Any]:
+                # Delivery can change the verdict. These are explicitly staged
+                # snapshots, bound by content hash from the authoritative audit.
+                return {
+                    "schema_version": 1,
+                    "request_id_hash": self._request_id_hash(ctx.request_id),
+                    "timestamp": _utcnow().isoformat(),
+                    "subject_id": ctx.subject_id,
+                    "action": ctx.enforced_action.value,
+                    "recommended_action": ctx.recommended_action.value,
+                    "risk_level": ctx.risk_level.value,
+                    "risk_score": ctx.risk_score,
+                    "detection_categories": sorted(
+                        {f"{item.detector}:{item.category}" for item in ctx.detections}
+                    ),
+                    "policy_version": self.bundle.policy_version,
+                    "policy_digest": self.bundle.digest,
+                    "audit_correlation_id": correlation_id,
+                    "decision_phase": "before_evidence_delivery",
+                }
+
             if ctx.recommended_action in {
                 GuardrailAction.REVIEW,
                 GuardrailAction.ESCALATE,
                 GuardrailAction.BLOCK,
             }:
                 try:
-                    incident_location = self.incidents.create(metadata_packet)
+                    packet = metadata_packet()
+                    incident_location = self.incidents.create(packet)
+                    evidence_hashes["incident"] = hashlib.sha256(
+                        _canonical_json(packet)
+                    ).hexdigest()
                 except StorageError:
                     ctx.diagnostics.append("incident_storage_failed")
                     ctx.recommended_action = GuardrailAction.BLOCK
@@ -3864,7 +3961,11 @@ class BedrockGuardrailSystem:
             }:
                 level = self.reviews.level(ctx.recommended_action, ctx.risk_level)
                 try:
-                    review_status = self.reviews.create(metadata_packet, level)
+                    packet = metadata_packet()
+                    review_status = self.reviews.create(packet, level)
+                    evidence_hashes["review"] = hashlib.sha256(
+                        _canonical_json(packet)
+                    ).hexdigest()
                 except StorageError:
                     ctx.diagnostics.append("review_storage_failed")
                     ctx.recommended_action = GuardrailAction.BLOCK
@@ -3887,7 +3988,13 @@ class BedrockGuardrailSystem:
             try:
                 audit_status = {
                     "status": "recorded",
-                    **self.audit.write(self._audit_event(ctx)),
+                    **self.audit.write(
+                        {
+                            **self._audit_event(ctx),
+                            "audit_correlation_id": correlation_id,
+                            "evidence_packet_hashes": evidence_hashes,
+                        }
+                    ),
                 }
             except StorageError:
                 ctx.diagnostics.append("local_audit_failed")

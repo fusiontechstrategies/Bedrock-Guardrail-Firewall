@@ -103,7 +103,7 @@ python orchestrator.py --profile production doctor
 ## Audit and metrics
 
 ```powershell
-python orchestrator.py verify-audit
+python orchestrator.py verify-audit --expected-count 42 --expected-last-hash <trusted-checkpoint-sha256>
 python orchestrator.py metrics-report
 ```
 

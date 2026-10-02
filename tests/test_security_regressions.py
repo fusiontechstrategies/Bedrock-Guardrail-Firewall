@@ -40,6 +40,8 @@ class SecurityRegressionTests(GuardrailTestCase):
             r"a+b?a+$",
             r"[A-Z]+a+$",
             r"(?=a+a+$)",
+            "a?" * 24 + "a{24}$",
+            "[aA]{0,1}" * 8 + "a{8}$",
         ):
             with (
                 self.subTest(pattern=pattern),
@@ -197,11 +199,74 @@ class SecurityRegressionTests(GuardrailTestCase):
             {"action": "ALLOW"},
             {"action": "NONE", "assessments": {}},
             {"action": "NONE", "assessments": [], "outputs": [1]},
+            {"action": "NONE", "assessments": [{}], "outputs": []},
+            {"action": "NONE", "assessments": [{"unknownPolicy": {}}], "outputs": []},
+            {
+                "action": "NONE",
+                "assessments": [
+                    {
+                        "sensitiveInformationPolicy": {
+                            "piiEntities": [{"action": "ANONYMIZED", "detected": True}]
+                        }
+                    }
+                ],
+                "outputs": [],
+            },
         ):
             with self.subTest(response=response):
                 system = self.make_live_system(FakeBedrockClient([response]))
                 result = system.process("Safe request.", record=False)
                 self.assertFalse(result["content_released"])
+
+    def test_staged_review_is_current_and_hash_bound_to_final_audit(self):
+        import hashlib
+        from tests.test_orchestrator import RecordingClient
+
+        system = self.make_live_system(
+            FakeBedrockClient(), review_queue_l3="https://example.invalid/l3"
+        )
+        sqs = RecordingClient()
+        system.provider._clients["sqs"] = sqs
+        with patch.object(
+            system.incidents, "create", side_effect=app.StorageError("fixture")
+        ):
+            result = system.process(
+                "Synthetic CUI // controlled unclassified information"
+            )
+        packet = json.loads(sqs.calls[0][1]["MessageBody"])
+        event = json.loads(system.audit.events_path.read_text().strip())
+        self.assertEqual(packet["action"], "block")
+        self.assertEqual(packet["recommended_action"], "block")
+        self.assertEqual(packet["decision_phase"], "before_evidence_delivery")
+        self.assertEqual(packet["audit_correlation_id"], event["audit_correlation_id"])
+        self.assertEqual(
+            event["evidence_packet_hashes"]["review"],
+            hashlib.sha256(app._canonical_json(packet)).hexdigest(),
+        )
+        self.assertEqual(event["enforced_action"], result["action"])
+
+    def test_privacy_key_rejects_windows_directory_junction(self):
+        import os
+        import subprocess
+
+        if os.name != "nt":
+            self.skipTest("Windows junction contract")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            junction = root / "redirect"
+            subprocess.run(
+                ["cmd.exe", "/c", "mklink", "/J", str(junction), str(target)],
+                check=True,
+                capture_output=True,
+            )
+            try:
+                with self.assertRaises(app.ConfigurationError):
+                    app.PrivacyKey(junction)
+                self.assertFalse((target / "privacy.key").exists())
+            finally:
+                junction.rmdir()
 
     def test_compound_repetition_is_rejected_without_evaluation(self):
         for pattern in (
