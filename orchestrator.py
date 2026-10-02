@@ -55,6 +55,7 @@ MAX_AUDIT_LINE_BYTES = 1_048_576
 LOCK_TIMEOUT_SECONDS = 5.0
 MAX_EVIDENCE_BYTES = 268_435_456
 MAX_EVIDENCE_FILES = 10_000
+MAX_JWT_SEGMENT_CHARS = (4096, 32768, 8192)
 
 logger = logging.getLogger("bedrock_guardrail_firewall")
 
@@ -1058,6 +1059,21 @@ def _validate_risk_thresholds(value: Any, field_name: str) -> dict[str, float]:
     return thresholds
 
 
+def _normalize_policy_map(
+    values: dict[str, Any], field_name: str, *, uppercase: bool = False
+) -> dict[str, Any]:
+    """Reject ambiguous identifiers before any order-dependent assignment."""
+    normalized: dict[str, Any] = {}
+    for raw_name, value in values.items():
+        name = _validate_identifier(raw_name, f"{field_name} key")
+        if uppercase:
+            name = name.upper()
+        if name in normalized:
+            raise ConfigurationError(f"{field_name} contains colliding identifiers")
+        normalized[name] = value
+    return normalized
+
+
 def load_policy_bundle(policy_path: Path, profiles_path: Path) -> PolicyBundle:
     if not policy_path.is_file():
         raise ConfigurationError(f"Policy file not found: {policy_path.name}")
@@ -1106,6 +1122,7 @@ def load_policy_bundle(policy_path: Path, profiles_path: Path) -> PolicyBundle:
         raise ConfigurationError(
             "policy.denied_topics must be an object with at most 128 topics"
         )
+    denied_raw = _normalize_policy_map(denied_raw, "policy.denied_topics")
     denied_topics: dict[str, list[str]] = {}
     pattern_count = 0
     for name, patterns in denied_raw.items():
@@ -1140,6 +1157,9 @@ def load_policy_bundle(policy_path: Path, profiles_path: Path) -> PolicyBundle:
     entity_actions_raw = policy["entity_actions"]
     if not isinstance(entity_actions_raw, dict) or len(entity_actions_raw) > 256:
         raise ConfigurationError("policy.entity_actions must be an object")
+    entity_actions_raw = _normalize_policy_map(
+        entity_actions_raw, "policy.entity_actions", uppercase=True
+    )
     entity_actions = {
         _validate_identifier(name, "policy.entity_actions key").upper(): _parse_action(
             action, field_name=f"policy.entity_actions.{name}"
@@ -1150,6 +1170,9 @@ def load_policy_bundle(policy_path: Path, profiles_path: Path) -> PolicyBundle:
     capability_roles_raw = policy["capability_roles"]
     if not isinstance(capability_roles_raw, dict):
         raise ConfigurationError("policy.capability_roles must be an object")
+    capability_roles_raw = _normalize_policy_map(
+        capability_roles_raw, "policy.capability_roles"
+    )
     capability_roles = {
         _validate_identifier(name, "policy.capability_roles key"): [
             role.lower()
@@ -1166,6 +1189,7 @@ def load_policy_bundle(policy_path: Path, profiles_path: Path) -> PolicyBundle:
     risk_weights_raw = policy["risk_weights"]
     if not isinstance(risk_weights_raw, dict):
         raise ConfigurationError("policy.risk_weights must be an object")
+    risk_weights_raw = _normalize_policy_map(risk_weights_raw, "policy.risk_weights")
     risk_weights = {
         _validate_identifier(name, "policy.risk_weights key"): _validate_threshold(
             value, f"policy.risk_weights.{name}"
@@ -1230,6 +1254,7 @@ def load_policy_bundle(policy_path: Path, profiles_path: Path) -> PolicyBundle:
         raise ConfigurationError(
             "policy profiles must contain between 1 and 32 profiles"
         )
+    profiles_raw = _normalize_policy_map(profiles_raw, "policy profiles")
 
     profiles: dict[str, PolicyProfile] = {}
     for raw_name, raw_profile in profiles_raw.items():
@@ -1745,7 +1770,10 @@ REGEX_RECOGNIZERS = (
     ),
     RegexRecognizer(
         "JWT",
-        re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
+        re.compile(
+            r"(?<![A-Za-z0-9_=-])[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\."
+            r"[A-Za-z0-9_-]*(?![A-Za-z0-9_=-])"
+        ),
         0.85,
     ),
     RegexRecognizer(
@@ -1757,6 +1785,39 @@ REGEX_RECOGNIZERS = (
         0.8,
     ),
 )
+
+
+def _jwt_credential_like(value: str) -> bool:
+    """Recognize compact JOSE credentials, without authenticating the token."""
+    segments = value.split(".")
+    if len(segments) != 3:
+        return False
+    if any(
+        len(segment) > maximum
+        for segment, maximum in zip(segments, MAX_JWT_SEGMENT_CHARS, strict=True)
+    ):
+        # Do not label an oversized potential credential safe by skipping it.
+        raise InputValidationError("Structured credential exceeds privacy budget")
+    try:
+        decoded = [
+            base64.b64decode(
+                segment + "=" * (-len(segment) % 4), altchars=b"-_", validate=True
+            )
+            for segment in segments
+        ]
+        header = json.loads(decoded[0].decode("utf-8"))
+    except RecursionError as exc:
+        raise InputValidationError("Structured credential exceeds JSON budget") from exc
+    except (ValueError, UnicodeError):
+        return False
+    if not isinstance(header, dict):
+        return False
+    algorithm = header.get("alg")
+    if not isinstance(algorithm, str) or not 1 <= len(algorithm) <= 128:
+        return False
+    # Payload remains opaque: this is secret recognition, not JWT validation.
+    # Empty signatures are recognized only for the standard unsecured form.
+    return bool(decoded[1]) and (bool(decoded[2]) or algorithm == "none")
 
 
 def _presidio_model_is_installed(model_name: str) -> bool:
@@ -1852,6 +1913,8 @@ class PrivacyEngine:
                 if len(findings) >= MAX_PRIVACY_FINDINGS:
                     raise InputValidationError("Privacy finding budget exceeded")
                 value = match.group(0)
+                if recognizer.entity_type == "JWT" and not _jwt_credential_like(value):
+                    continue
                 validated = False
                 if recognizer.checksum == "luhn":
                     if not _luhn_valid(value):
