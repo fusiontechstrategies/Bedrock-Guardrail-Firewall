@@ -75,6 +75,8 @@ does not verify their signatures, authorize their holders, or validate claims.
 Encoded header, payload, and signature segments are limited to 4,096, 32,768,
 and 8,192 characters respectively. Oversized compact candidates raise a local
 validation error instead of silently bypassing privacy processing.
+Common `access_token=` syntax is recognized. Header suffix checks for hyphen or
+underscore labels are limited to 64 candidates; exhaustion fails closed.
 
 Policy identifiers must be unique after the exact normalization used by runtime
 maps. Whitespace collisions are rejected in topic, role, weight, and profile

@@ -37,6 +37,64 @@ def signed_token(header: str) -> str:
 
 
 class LatestPrivacyScanTests(GuardrailTestCase):
+    def test_delimited_tokens_cannot_cross_grounding_allowed_content_routes(self):
+        token = signed_token(' { "alg": "HS256", "typ": "JWT" }')
+        for prefix in (
+            "Bearer ",
+            "access_token=",
+            "?access_token=",
+            "token-",
+            "token_",
+        ):
+            for route in ("input", "output", "retrieval"):
+                with self.subTest(prefix=prefix, route=route):
+                    client = FakeBedrockClient()
+                    system = self.make_live_system(client)
+                    user_input, output = (
+                        "Write a short summary.",
+                        "A short approved summary.",
+                    )
+                    context = {"retrieval_contexts": [{"id": "doc", "text": output}]}
+                    # The same route is otherwise allowed and actually calls the
+                    # injected AWS boundary, so grounding cannot mask this test.
+                    baseline = system.process(user_input, context, output, record=False)
+                    self.assertTrue(baseline["content_released"])
+                    self.assertTrue(client.calls)
+                    client.calls.clear()
+                    if route == "input":
+                        user_input += " " + prefix + token
+                    elif route == "output":
+                        output += " " + prefix + token
+                        context["retrieval_contexts"][0]["text"] = output
+                    else:
+                        context["retrieval_contexts"][0]["text"] += " " + prefix + token
+                    result = system.process(user_input, context, output, record=False)
+                    self.assertFalse(result["content_released"])
+                    self.assertNotIn(token, json.dumps(result))
+                    self.assertNotIn(token, json.dumps(client.calls))
+                    self.assertTrue(
+                        any(
+                            x.entity_type == "JWT"
+                            for x in system.privacy._regex_findings(prefix + token)
+                        )
+                    )
+
+    def test_equals_delimited_oversized_candidate_never_reaches_aws(self):
+        client = FakeBedrockClient()
+        system = self.make_live_system(client)
+        text = "access_token=" + "A" * 4097 + ".e30.AAAA"
+        with self.assertRaises(app.InputValidationError):
+            system.privacy._regex_findings(text)
+        with self.assertRaises(app.InputValidationError):
+            system.process(text, {}, record=False)
+        self.assertFalse(client.calls)
+
+    def test_ambiguous_header_suffix_search_has_a_fixed_candidate_budget(self):
+        system = self.make_system()
+        text = "access_token=" + "a-" * 65 + ".e30.AAAA"
+        with self.assertRaisesRegex(app.InputValidationError, "candidate budget"):
+            system.privacy._regex_findings(text)
+
     def test_signed_jwt_serializations_are_contained_on_every_content_route(self):
         headers = (
             '{"alg":"HS256","typ":"JWT"}',

@@ -56,6 +56,7 @@ LOCK_TIMEOUT_SECONDS = 5.0
 MAX_EVIDENCE_BYTES = 268_435_456
 MAX_EVIDENCE_FILES = 10_000
 MAX_JWT_SEGMENT_CHARS = (4096, 32768, 8192)
+MAX_JWT_HEADER_CANDIDATES = 64
 
 logger = logging.getLogger("bedrock_guardrail_firewall")
 
@@ -1771,8 +1772,8 @@ REGEX_RECOGNIZERS = (
     RegexRecognizer(
         "JWT",
         re.compile(
-            r"(?<![A-Za-z0-9_=-])[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\."
-            r"[A-Za-z0-9_-]*(?![A-Za-z0-9_=-])"
+            r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\."
+            r"[A-Za-z0-9_-]*(?![A-Za-z0-9_-])"
         ),
         0.85,
     ),
@@ -1803,21 +1804,39 @@ def _jwt_credential_like(value: str) -> bool:
             base64.b64decode(
                 segment + "=" * (-len(segment) % 4), altchars=b"-_", validate=True
             )
-            for segment in segments
+            for segment in segments[1:]
         ]
-        header = json.loads(decoded[0].decode("utf-8"))
-    except RecursionError as exc:
-        raise InputValidationError("Structured credential exceeds JSON budget") from exc
     except (ValueError, UnicodeError):
         return False
-    if not isinstance(header, dict):
-        return False
-    algorithm = header.get("alg")
-    if not isinstance(algorithm, str) or not 1 <= len(algorithm) <= 128:
-        return False
+    # Hyphens and underscores are valid base64url characters, but are also
+    # common labels/delimiters in text. Try bounded suffixes, retaining the
+    # complete finding span for redaction. Never authenticate any candidate.
+    starts = [0] + [i + 1 for i, char in enumerate(segments[0]) if char in "-_"]
+    for attempt, start in enumerate(starts):
+        if attempt >= MAX_JWT_HEADER_CANDIDATES:
+            raise InputValidationError("Structured credential exceeds candidate budget")
+        encoded_header = segments[0][start:]
+        try:
+            header_bytes = base64.b64decode(
+                encoded_header + "=" * (-len(encoded_header) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+            header = json.loads(header_bytes.decode("utf-8"))
+        except RecursionError as exc:
+            raise InputValidationError(
+                "Structured credential exceeds JSON budget"
+            ) from exc
+        except (ValueError, UnicodeError):
+            continue
+        if not isinstance(header, dict):
+            continue
+        algorithm = header.get("alg")
+        if isinstance(algorithm, str) and 1 <= len(algorithm) <= 128:
+            return bool(decoded[0]) and (bool(decoded[1]) or algorithm == "none")
     # Payload remains opaque: this is secret recognition, not JWT validation.
     # Empty signatures are recognized only for the standard unsecured form.
-    return bool(decoded[1]) and (bool(decoded[2]) or algorithm == "none")
+    return False
 
 
 def _presidio_model_is_installed(model_name: str) -> bool:
