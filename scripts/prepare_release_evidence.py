@@ -496,7 +496,8 @@ def validate_sdist(path: Path, version: str, source_root: Path | None = None) ->
             )
             if source_root is not None and member.isfile():
                 relative = "/".join(parts[1:])
-                if relative.endswith((".py", ".pth")) or relative in {
+                portable_relative = unicodedata.normalize("NFC", relative).casefold()
+                if portable_relative.endswith((".py", ".pth")) or portable_relative in {
                     "pyproject.toml",
                     "setup.cfg",
                     "setup.py",
@@ -505,6 +506,10 @@ def validate_sdist(path: Path, version: str, source_root: Path | None = None) ->
                     "__init__.py",
                     "py.typed",
                 }:
+                    require(
+                        relative == portable_relative,
+                        "Non-canonical executable source member",
+                    )
                     handle = archive.extractfile(member)
                     require(handle is not None, "Unable to read source member")
                     value = handle.read()

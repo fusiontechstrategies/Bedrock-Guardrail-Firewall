@@ -139,6 +139,38 @@ jobs:
           "${RUNNER_TEMP}/package-presidio-smoke/bin/python" -m pip check
           "${RUNNER_TEMP}/package-presidio-smoke/bin/python" "${GITHUB_WORKSPACE}/scripts/validate_installed_package.py" presidio
 
+  windows-sdist:
+    name: Validate Windows source installation
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install packaging tools and build
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements-build.txt
+          python -m build
+          python scripts/prepare_release_evidence.py --help
+      - name: Verify reviewed source and install without package downloads
+        run: |
+          @'
+          import os, subprocess, sys, tempfile
+          from pathlib import Path
+          from scripts.prepare_release_evidence import validate_sdist
+          archive = next(Path("dist").glob("*.tar.gz")).resolve()
+          validate_sdist(archive, "4.1.1", Path.cwd())
+          subprocess.run([sys.executable, "-m", "pip", "install", "--no-index", "--no-deps", "--no-build-isolation", str(archive)], check=True)
+          root = Path.cwd()
+          with tempfile.TemporaryDirectory() as folder:
+              subprocess.run([sys.executable, str(root / "scripts/validate_installed_package.py"), "core"], cwd=folder, check=True)
+          '@ | python -
+
   aws-sdk-contract:
     name: AWS SDK contract Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -197,7 +229,7 @@ jobs:
   required-checks:
     name: Required checks
     if: always()
-    needs: [test, quality, package, aws-sdk-contract, presidio-integration]
+    needs: [test, quality, package, windows-sdist, aws-sdk-contract, presidio-integration]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -206,11 +238,13 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           QUALITY_RESULT: ${{ needs.quality.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
+          WINDOWS_SDIST_RESULT: ${{ needs.windows-sdist.result }}
           AWS_CONTRACT_RESULT: ${{ needs.aws-sdk-contract.result }}
           PRESIDIO_RESULT: ${{ needs.presidio-integration.result }}
         run: |
           test "$TEST_RESULT" = "success"
           test "$QUALITY_RESULT" = "success"
           test "$PACKAGE_RESULT" = "success"
+          test "$WINDOWS_SDIST_RESULT" = "success"
           test "$AWS_CONTRACT_RESULT" = "success"
           test "$PRESIDIO_RESULT" = "success"
