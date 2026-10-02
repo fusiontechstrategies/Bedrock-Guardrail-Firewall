@@ -361,27 +361,42 @@ def _privacy_key_from_env() -> bytes | None:
     return key
 
 
+# Unicode 17.0.0 DerivedCoreProperties.txt, Default_Ignorable_Code_Point.
+# Source SHA-256: 24c7fed1195c482faaefd5c1e7eb821c5ee1fb6de07ecdbaa64b56a99da22c08
+DEFAULT_IGNORABLE_RANGES = (
+    (173, 173),
+    (847, 847),
+    (1564, 1564),
+    (4447, 4448),
+    (6068, 6069),
+    (6155, 6157),
+    (6158, 6158),
+    (6159, 6159),
+    (8203, 8207),
+    (8234, 8238),
+    (8288, 8292),
+    (8293, 8293),
+    (8294, 8303),
+    (12644, 12644),
+    (65024, 65039),
+    (65279, 65279),
+    (65440, 65440),
+    (65520, 65528),
+    (113824, 113827),
+    (119155, 119162),
+    (917504, 917504),
+    (917505, 917505),
+    (917506, 917535),
+    (917536, 917631),
+    (917632, 917759),
+    (917760, 917999),
+    (918000, 921599),
+)
+
+
 def _is_default_ignorable(character: str) -> bool:
-    # Unicode Default_Ignorable_Code_Point includes format controls, fillers,
-    # variation selectors and reserved tag space. Keep ordinary combining marks.
     codepoint = ord(character)
-    return unicodedata.category(character) == "Cf" or any(
-        low <= codepoint <= high
-        for low, high in (
-            (0x034F, 0x034F),
-            (0x115F, 0x1160),
-            (0x17B4, 0x17B5),
-            (0x180B, 0x180F),
-            (0x2065, 0x2065),
-            (0x3164, 0x3164),
-            (0xFE00, 0xFE0F),
-            (0xFFA0, 0xFFA0),
-            (0xFFF0, 0xFFF8),
-            (0x1BCA0, 0x1BCA3),
-            (0x1D173, 0x1D17A),
-            (0xE0000, 0xE0FFF),
-        )
-    )
+    return any(low <= codepoint <= high for low, high in DEFAULT_IGNORABLE_RANGES)
 
 
 def _normalize_for_detection(text: str) -> str:
@@ -2574,13 +2589,45 @@ class BedrockGuardrailAdapter:
                     and bool(item)
                     and not set(item) - {"logic", "naturalLanguage"}
                     and all(
-                        isinstance(text, str) and len(text) <= 1000
+                        isinstance(text, str)
+                        and bool(text.strip())
+                        and len(text) <= 1000
                         for text in item.values()
                     )
                     for item in value
                 )
             )
 
+        for key in ("supportingRules", "contradictingRules"):
+            if key in payload and (
+                len(payload[key]) > 256
+                or any(
+                    not isinstance(rule, dict)
+                    or set(rule) != {"identifier", "policyVersionArn"}
+                    or not isinstance(rule["identifier"], str)
+                    or not re.fullmatch(r"[a-z0-9]{12}", rule["identifier"])
+                    or not isinstance(rule["policyVersionArn"], str)
+                    or len(rule["policyVersionArn"]) > 2048
+                    or not re.fullmatch(
+                        r"arn:aws(?:-[^:]+)?:bedrock:[a-z0-9-]{1,20}:[0-9]{12}:automated-reasoning-policy/[a-z0-9]{12}(?::[1-9][0-9]{0,11})?",
+                        rule["policyVersionArn"],
+                    )
+                    for rule in payload[key]
+                )
+            ):
+                raise ExternalServiceError("Invalid reasoning supporting rule")
+        if "logicWarning" in payload:
+            warning = payload["logicWarning"]
+            if (
+                set(warning) - {"type", "premises", "claims"}
+                or warning.get("type") not in {"ALWAYS_FALSE", "ALWAYS_TRUE"}
+                or any(
+                    not statements(warning[key])
+                    for key in ("premises", "claims")
+                    if key in warning
+                )
+            ):
+                raise ExternalServiceError("Invalid reasoning logic warning")
         for key in ("translation", "claimsTrueScenario", "claimsFalseScenario"):
             if key not in payload:
                 continue
@@ -2622,7 +2669,7 @@ class BedrockGuardrailAdapter:
         if variant == "valid" and (
             not payload.get("translation", {}).get("claims")
             or not payload.get("claimsTrueScenario", {}).get("statements")
-            or payload.get("logicWarning")
+            or "logicWarning" in payload
             or payload.get("translation", {}).get("untranslatedClaims")
             or payload.get("translation", {}).get("untranslatedPremises")
         ):

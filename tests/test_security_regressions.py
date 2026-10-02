@@ -626,3 +626,60 @@ class SecurityRegressionTests(GuardrailTestCase):
             "input",
         )
         self.assertEqual(response.action, app.GuardrailAction.REVIEW)
+
+    def test_non_ignorable_format_characters_are_preserved(self):
+        for control in (
+            "\u0600",
+            "\u06dd",
+            "\u070f",
+            "\u0890",
+            "\ufff9",
+            "\ufffa",
+            "\ufffb",
+            "\U00013430",
+            "\U00013440",
+        ):
+            with self.subTest(control=repr(control)):
+                text = "A" + control + "B"
+                self.assertEqual(
+                    app.validate_text(text, "input", 32, required=True), text
+                )
+
+    def test_blank_or_malformed_positive_reasoning_proofs_fail_closed(self):
+        import copy
+
+        statement = {"logic": "P", "naturalLanguage": "A synthetic claim"}
+        proof = {
+            "translation": {"claims": [statement]},
+            "claimsTrueScenario": {"statements": [statement]},
+        }
+        for patch_data in (
+            {"translation": {"claims": [{"logic": ""}]}},
+            {"claimsTrueScenario": {"statements": [{"naturalLanguage": " "}]}},
+            {"logicWarning": {}},
+            {"logicWarning": {"type": "ALWAYS_TRUE"}},
+            {"supportingRules": ["bad-rule"]},
+            {
+                "supportingRules": [
+                    {"identifier": "abcdefghijkl", "policyVersionArn": "not-an-arn"}
+                ]
+            },
+        ):
+            finding = {"valid": {**copy.deepcopy(proof), **patch_data}}
+            response = {
+                "action": "NONE",
+                "assessments": [{"automatedReasoningPolicy": {"findings": [finding]}}],
+                "outputs": [],
+            }
+            with (
+                self.subTest(patch_data=patch_data),
+                self.assertRaises(app.ExternalServiceError),
+            ):
+                app.BedrockGuardrailAdapter._parse_response(response, "input")
+            system = self.make_live_system(FakeBedrockClient(response))
+            result = system.process("Synthetic safe request", record=False)
+            self.assertEqual(
+                result["recommended_action"],
+                system.profile.external_failure_action.value,
+            )
+            self.assertFalse(result["content_released"])
