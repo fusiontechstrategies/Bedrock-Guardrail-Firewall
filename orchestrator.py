@@ -1958,9 +1958,8 @@ class PrivacyEngine:
 
     def _regex_findings(self, text: str) -> list[EntityFinding]:
         findings: list[EntityFinding] = []
-        for candidate, match in enumerate(OPAQUE_TOKEN_LABEL.finditer(text)):
-            if candidate >= MAX_OPAQUE_TOKEN_CANDIDATES:
-                raise InputValidationError("Opaque credential exceeds candidate budget")
+        candidates = 0
+        for match in OPAQUE_TOKEN_LABEL.finditer(text):
             value = match.group("value")
             if value.lower() in OPAQUE_TOKEN_PLACEHOLDERS:
                 continue
@@ -1972,6 +1971,9 @@ class PrivacyEngine:
                 # Bare scheme-like prose (for example bearer bonds) is common.
                 # Explicit credential fields/headers still contain short values.
                 continue
+            if candidates >= MAX_OPAQUE_TOKEN_CANDIDATES:
+                raise InputValidationError("Opaque credential exceeds candidate budget")
+            candidates += 1
             entity_type = "OPAQUE_TOKEN"
             if value.count(".") == 2 and _jwt_credential_like(value):
                 # Keep JOSE budgets/policy, covering the complete labelled value

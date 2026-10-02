@@ -110,7 +110,7 @@ class OpaqueCredentialTests(GuardrailTestCase):
         )
         for text in (
             "access_token=" + "x" * 4097,
-            "Bearer x " * 65,
+            "Authorization: Bearer x " * 65,
             "access_token=abc%2Fdef",
             "refresh_token=abc\\def",
             "Authorization: Bearer abc@def",
@@ -214,6 +214,20 @@ class OpaqueCredentialTests(GuardrailTestCase):
             system.privacy.evaluate("Bearer " + "a" * 15, "input").findings
         )
         self.assertTrue(system.privacy.evaluate("Bearer " + "a" * 16, "input").findings)
+
+    def test_excluded_prose_and_placeholders_do_not_exhaust_credential_budget(self):
+        client = FakeBedrockClient()
+        system = self.make_live_system(client)
+        prose = "Explain bearer bonds. Bearer token refresh_token=redacted " * 80
+        result = system.privacy.evaluate(prose, "input")
+        self.assertEqual(result.sanitized_text, prose)
+        self.assertFalse(result.findings)
+        self.assertEqual(
+            len(system.privacy._regex_findings(prose + "access_token=x " * 64)), 64
+        )
+        with self.assertRaisesRegex(app.InputValidationError, "candidate budget"):
+            system.process(prose + "Authorization: Bearer x " * 65, {}, record=False)
+        self.assertFalse(client.calls)
 
 
 def change_wheel_metadata(wheel: Path, metadata: bytes) -> None:

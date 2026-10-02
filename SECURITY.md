@@ -97,6 +97,8 @@ Bare `Bearer` values must be at least 16 characters, so ordinary phrases such as
 `Authorization: Bearer` headers (including quoted JSON headers), `access_token`,
 and `refresh_token` fields contain shorter values too. Short bare Bearer values
 are outside the supported grammar; this threshold is not an entropy test.
+Excluded placeholders and short bare prose do not consume the credential-candidate
+budget. The existing text-size limits still bound their linear scan.
 
 Lambda cold startup requires `GUARDRAIL_REMOTE_AUDIT_REQUIRED=true`, a remote
 audit bucket, live AWS mode, and an injected stable privacy HMAC key. Request data
