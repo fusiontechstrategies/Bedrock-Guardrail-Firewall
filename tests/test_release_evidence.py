@@ -97,6 +97,20 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 ):
                     release.validate_sdist(sdist, VERSION, root)
 
+    def test_archive_rejects_ntfs_streams_in_any_component(self):
+        from scripts import normalize_sdist as normalizer
+
+        for alias in (
+            "package/setup.py::$DATA",
+            "package/nested:stream/file.py",
+            "package/normal.py:payload",
+        ):
+            with self.subTest(alias=alias):
+                with self.assertRaises(release.ReleaseEvidenceError):
+                    release.archive_parts(alias)
+                with self.assertRaises(normalizer.SdistNormalizationError):
+                    normalizer.validate_member_name(alias)
+
     def make_source(self, root: Path) -> None:
         (root / "scripts").mkdir()
         (root / "pyproject.toml").write_text(

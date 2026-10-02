@@ -402,10 +402,14 @@ def _is_default_ignorable(character: str) -> bool:
 def _normalize_for_detection(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text)
     return "".join(
-        character
+        " "
+        if unicodedata.category(character) == "Cc"
+        and character.isspace()
+        and character not in {"\n", "\r", "\t"}
+        else character
         for character in normalized
         if not _is_default_ignorable(character)
-        and (character in {"\n", "\r", "\t"} or unicodedata.category(character) != "Cc")
+        and (character.isspace() or unicodedata.category(character) != "Cc")
     )
 
 
@@ -865,6 +869,11 @@ def _validate_string_list(
     for item in value:
         if not isinstance(item, str) or not item.strip() or len(item) > maximum_length:
             raise ConfigurationError(f"{field_name} contains an invalid string")
+        if (
+            field_name in {"policy.blocked_terms", "policy.masked_terms"}
+            and not _normalize_for_detection(item).split()
+        ):
+            raise ConfigurationError(f"{field_name} contains an empty normalized term")
         result.append(item.strip())
     return result
 
@@ -1721,7 +1730,7 @@ REGEX_RECOGNIZERS = (
     ),
     RegexRecognizer(
         "SLACK_TOKEN",
-        re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,200}\b"),
+        re.compile(r"\b(?:xox[baprs]|xapp)-[A-Za-z0-9-]{10,200}\b"),
         0.99,
     ),
     RegexRecognizer(
@@ -1731,7 +1740,7 @@ REGEX_RECOGNIZERS = (
     ),
     RegexRecognizer(
         "PRIVATE_KEY",
-        re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"),
+        re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY(?: BLOCK)?-----"),
         0.99,
     ),
     RegexRecognizer(
@@ -2062,9 +2071,15 @@ class LocalPolicyEngine:
 
     @staticmethod
     def _term_pattern(term: str) -> re.Pattern[str]:
-        prefix = r"(?<!\w)" if term[:1].isalnum() else ""
-        suffix = r"(?!\w)" if term[-1:].isalnum() else ""
-        return re.compile(prefix + re.escape(term) + suffix, re.IGNORECASE)
+        parts = _normalize_for_detection(term).split()
+        if not parts:
+            raise ConfigurationError("Policy term is empty after normalization")
+        prefix = r"(?<!\w)" if parts[0][:1].isalnum() else ""
+        suffix = r"(?!\w)" if parts[-1][-1:].isalnum() else ""
+        return re.compile(
+            prefix + r"\s+".join(re.escape(part) for part in parts) + suffix,
+            re.IGNORECASE,
+        )
 
     def evaluate(self, text: str, field_name: str) -> tuple[str, list[Detection]]:
         normalized = _normalize_for_detection(text)
@@ -3238,7 +3253,13 @@ class AuditStore:
             return None, _safe_error_type(exc)
 
     def write(self, event: Mapping[str, Any]) -> dict[str, Any]:
-        self.audit_dir.mkdir(parents=True, exist_ok=True)
+        self.audit_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _reject_path_links(self.audit_dir)
+        if os.name != "nt":
+            info = self.audit_dir.stat()
+            if info.st_uid != os.getuid():
+                raise StorageError("Audit directory owner is unsafe")
+            self.audit_dir.chmod(0o700)
         with (
             _evidence_budget(self.config.data_dir, MAX_AUDIT_LINE_BYTES, 2),
             CrossProcessFileLock(self.lock_path, timeout=300),
@@ -3286,12 +3307,22 @@ class AuditStore:
             if len(encoded) > MAX_AUDIT_LINE_BYTES:
                 raise StorageError("Audit record exceeds the maximum safe size")
             try:
-                with self.events_path.open("ab") as handle:
+                try:
+                    fd = _open_private_key(self.events_path, create=True)
+                except FileExistsError:
+                    fd = _open_private_key(self.events_path, create=False)
+                with os.fdopen(fd, "r+b") as handle:
+                    info = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise StorageError("Audit log must be one regular file")
+                    if os.name != "nt" and (
+                        info.st_uid != os.getuid() or info.st_mode & 0o077
+                    ):
+                        raise StorageError("Audit log permissions are unsafe")
+                    handle.seek(0, os.SEEK_END)
                     handle.write(encoded)
                     handle.flush()
                     os.fsync(handle.fileno())
-                with contextlib.suppress(OSError):
-                    self.events_path.chmod(0o600)
                 _atomic_json_write(
                     self.chain_path,
                     {
@@ -3300,7 +3331,7 @@ class AuditStore:
                         "updated_at": _utcnow().isoformat(),
                     },
                 )
-            except (OSError, StorageError) as exc:
+            except (OSError, StorageError, ConfigurationError) as exc:
                 if remote_location:
                     amendment = {
                         **core,
@@ -4940,24 +4971,102 @@ def lambda_handler(event: Any, context: Any) -> dict[str, Any]:
         )
 
 
+MAX_CLI_INPUT_BYTES = 1_048_576
+CLI_STREAM_TIMEOUT_SECONDS = 10.0
+
+
+def _bounded_stdin_bytes() -> bytes:
+    import io
+
+    if isinstance(sys.stdin, io.StringIO):
+        return sys.stdin.read(MAX_CLI_INPUT_BYTES + 1).encode("utf-8")
+    fd = sys.stdin.fileno()
+    if stat.S_ISREG(os.fstat(fd).st_mode):
+        return os.read(fd, MAX_CLI_INPUT_BYTES + 1)
+    if sys.stdin.isatty():
+        raise InputValidationError("Use direct text or a finite input stream")
+    deadline = time.monotonic() + CLI_STREAM_TIMEOUT_SECONDS
+    chunks: list[bytes] = []
+    size = 0
+    while size <= MAX_CLI_INPUT_BYTES:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise InputValidationError(
+                "Input stream did not finish within its deadline"
+            )
+        available = MAX_CLI_INPUT_BYTES + 1 - size
+        if os.name == "nt":
+            import ctypes
+            import ctypes.wintypes as wintypes
+            import msvcrt
+
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.PeekNamedPipe.argtypes = [
+                wintypes.HANDLE,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                ctypes.c_void_p,
+                ctypes.POINTER(wintypes.DWORD),
+                ctypes.c_void_p,
+            ]
+            kernel.PeekNamedPipe.restype = wintypes.BOOL
+            ready = wintypes.DWORD()
+            if not kernel.PeekNamedPipe(
+                msvcrt.get_osfhandle(fd), None, 0, None, ctypes.byref(ready), None
+            ):
+                if ctypes.get_last_error() == 109:
+                    break
+                raise InputValidationError("Unable to read input stream safely")
+            if not ready.value:
+                time.sleep(min(remaining, 0.01))
+                continue
+            available = min(available, ready.value)
+        else:
+            import select
+
+            if not select.select([fd], [], [], remaining)[0]:
+                raise InputValidationError(
+                    "Input stream did not finish within its deadline"
+                )
+        chunk = os.read(fd, min(65536, available))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
 def _read_cli_text(path: str | None, direct: str | None, field_name: str) -> str:
     if path and direct is not None:
         raise InputValidationError(
             f"Use either --{field_name} or --{field_name}-file, not both"
         )
-    if path:
+    if not path:
+        return direct or ""
+    try:
         if path == "-":
-            return sys.stdin.read()
-        file_path = Path(path)
-        try:
-            if file_path.stat().st_size > 1_048_576:
-                raise InputValidationError(f"{field_name} file is too large")
-            return file_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError as exc:
-            raise InputValidationError(f"{field_name} file must be UTF-8") from exc
-        except OSError as exc:
-            raise InputValidationError(f"Unable to read {field_name} file") from exc
-    return direct or ""
+            value = _bounded_stdin_bytes()
+        else:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_BINARY", 0)
+            )
+            _reject_path_links(Path(path))
+            fd = os.open(path, flags)
+            with os.fdopen(fd, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise InputValidationError(f"{field_name} file must be regular")
+                value = handle.read(MAX_CLI_INPUT_BYTES + 1)
+        if len(value) > MAX_CLI_INPUT_BYTES:
+            raise InputValidationError(f"{field_name} input is too large")
+        return value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InputValidationError(f"{field_name} file must be UTF-8") from exc
+    except OSError as exc:
+        raise InputValidationError(f"Unable to read {field_name} input") from exc
 
 
 def _parse_context_argument(raw: str | None, path: str | None) -> dict[str, Any]:

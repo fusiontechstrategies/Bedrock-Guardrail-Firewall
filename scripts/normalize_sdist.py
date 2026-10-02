@@ -25,6 +25,10 @@ def require(condition: bool, message: str) -> None:
 
 
 def validate_member_name(name: str) -> None:
+    require(
+        ":" not in name,
+        f"Archive member contains a drive path or Windows stream alias: {name!r}",
+    )
     require("\\" not in name, f"Archive member uses a backslash: {name!r}")
     require(not name.startswith("/"), f"Archive member is absolute: {name!r}")
     require(

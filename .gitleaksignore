@@ -1,0 +1,2 @@
+# Exact historical false positive: regression fixture contains placeholder text, no private key.
+0505322cf9667b96bcf6025df91c2195eeb735ba:tests/test_security_regressions.py:private-key:125
