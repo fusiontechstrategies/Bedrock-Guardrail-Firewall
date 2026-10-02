@@ -667,6 +667,7 @@ class SecurityRegressionTests(GuardrailTestCase):
                     "\ud800",
                     "\u0600",
                     "\u0301",
+                    "\u2800",
                 )
             ),
             *(
@@ -710,3 +711,11 @@ class SecurityRegressionTests(GuardrailTestCase):
                 system.profile.external_failure_action.value,
             )
             self.assertFalse(result["content_released"])
+
+    def test_multilingual_reasoning_proof_uses_character_not_byte_budget(self):
+        statement = {"logic": "P", "naturalLanguage": "é" * 501}
+        proof = {
+            "translation": {"claims": [statement]},
+            "claimsTrueScenario": {"statements": [statement]},
+        }
+        app.BedrockGuardrailAdapter._validate_reasoning_finding({"valid": proof})

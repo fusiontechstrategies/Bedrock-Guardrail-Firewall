@@ -2581,14 +2581,17 @@ class BedrockGuardrailAdapter:
             raise ExternalServiceError("Invalid automated reasoning payload")
 
         def proof_text(value: Any) -> bool:
-            if not isinstance(value, str):
+            if not isinstance(value, str) or len(value) > 1000 or "\x00" in value:
                 return False
             try:
-                canonical = validate_text(value, "reasoning proof", 1000, required=True)
-            except InputValidationError:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
                 return False
+            canonical = _normalize_for_detection(value)
+            # A positive proof must name a claim, rather than consist solely of
+            # formatting, punctuation, a truth symbol, or blank-looking symbols.
             return any(
-                unicodedata.category(character)[0] in "LNPS" for character in canonical
+                unicodedata.category(character)[0] in "LN" for character in canonical
             )
 
         def statements(value: Any) -> bool:
