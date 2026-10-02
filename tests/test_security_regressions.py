@@ -271,9 +271,11 @@ class SecurityRegressionTests(GuardrailTestCase):
             try:
                 with self.assertRaises(app.ConfigurationError):
                     app.PrivacyKey(junction)
-                with patch.dict(os.environ, {"GUARDRAIL_DATA_DIR": str(junction)}):
-                    with self.assertRaises(app.ConfigurationError):
-                        app.RuntimeConfig.from_env()
+                with (
+                    patch.dict(os.environ, {"GUARDRAIL_DATA_DIR": str(junction)}),
+                    self.assertRaises(app.ConfigurationError),
+                ):
+                    app.RuntimeConfig.from_env()
                 with self.assertRaises(app.ConfigurationError):
                     app.RuntimeConfig.from_env(data_dir=junction)
                 self.assertFalse((target / "privacy.key").exists())
