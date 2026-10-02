@@ -33,6 +33,8 @@ incident_logs/
 guardrail_behavior_state.json
 guardrail_metrics.json
 *.lock
+!requirements-build.lock
+!requirements-verifier.lock
 
 # Local-only source material
 .local-reference/

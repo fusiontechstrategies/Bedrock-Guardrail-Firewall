@@ -113,7 +113,7 @@ class OpaqueCredentialTests(GuardrailTestCase):
             "Bearer x " * 65,
             "access_token=abc%2Fdef",
             "refresh_token=abc\\def",
-            "Bearer abc@def",
+            "Authorization: Bearer abc@def",
         ):
             with self.subTest(text=text[:80]):
                 with self.assertRaises(app.InputValidationError):
@@ -175,6 +175,45 @@ class OpaqueCredentialTests(GuardrailTestCase):
                 self.assertNotIn(token, json.dumps(result))
                 self.assertTrue(client.calls)
                 self.assertNotIn(token, json.dumps(client.calls))
+
+    def test_natural_bearer_prose_remains_unchanged_on_every_content_route(self):
+        for phrase in ("bearer bonds", "bearer shares", "bearer plant"):
+            for route in ("input", "output", "retrieval"):
+                with self.subTest(phrase=phrase, route=route):
+                    client = FakeBedrockClient()
+                    system = self.make_live_system(client)
+                    text = "Explain " + phrase + "."
+                    privacy = system.privacy.evaluate(text, route)
+                    self.assertEqual(privacy.sanitized_text, text)
+                    self.assertFalse(privacy.findings)
+                    user_input, output = "Write a short summary.", text
+                    context = {"retrieval_contexts": [{"id": "doc", "text": output}]}
+                    if route == "input":
+                        user_input = text
+                    result = system.process(user_input, context, output, record=False)
+                    self.assertTrue(result["content_released"])
+                    self.assertTrue(client.calls)
+                    self.assertIn(phrase, json.dumps(client.calls))
+
+    def test_explicit_short_credentials_and_bare_length_boundary(self):
+        system = self.make_system()
+        for prefix in (
+            "access_token=",
+            "refresh_token=",
+            "Authorization: Bearer ",
+            '"Authorization": "Bearer ',
+            "Ａｕｔｈｏｒｉｚａｔｉｏｎ： Ｂｅａｒｅｒ ",
+        ):
+            with self.subTest(prefix=prefix):
+                result = system.privacy.evaluate(prefix + "a7", "input")
+                self.assertNotIn("a7", result.sanitized_text)
+                self.assertTrue(
+                    any(x.entity_type == "OPAQUE_TOKEN" for x in result.findings)
+                )
+        self.assertFalse(
+            system.privacy.evaluate("Bearer " + "a" * 15, "input").findings
+        )
+        self.assertTrue(system.privacy.evaluate("Bearer " + "a" * 16, "input").findings)
 
 
 def change_wheel_metadata(wheel: Path, metadata: bytes) -> None:
@@ -366,7 +405,9 @@ class MarkerAndArchiveTests(unittest.TestCase):
                 archive.addfile(member, io.BytesIO(payload))
             buffer_archive.seek(0)
             with tarfile.open(fileobj=buffer_archive, mode="r") as archive:
-                archive.extractall(path.parent, filter="data")
+                # This archive has exactly one owned, inert, OS-observed member;
+                # extract that member with the API supported on Python 3.10.
+                archive.extract(alias.name, path.parent)
             self.assertEqual(path.read_bytes(), payload)
 
 
@@ -418,6 +459,51 @@ class LambdaDurableAuditTests(GuardrailTestCase):
                 )
                 constructor.assert_not_called()
                 self.assertIsNone(app._LAMBDA_SYSTEM)
+
+    def test_malformed_cold_events_cannot_bypass_startup_gate(self):
+        events = (
+            None,
+            [],
+            {"body": "{"},
+            {"body": "[]"},
+            {"body": '{"user_input":"a","user_input":"b"}'},
+            {"body": {"user_input": "safe", "record": False}},
+            {"body": {"user_input": "safe", "remote_audit_required": False}},
+            {"body": {"user_input": "safe", "user_context": []}},
+            {"body": "invalid!", "isBase64Encoded": True},
+            {"body": [], "isBase64Encoded": True},
+        )
+        for event in events:
+            with self.subTest(event=event):
+                with (
+                    patch.object(
+                        app.RuntimeConfig,
+                        "from_lambda_env",
+                        side_effect=app.ConfigurationError("synthetic missing profile"),
+                    ) as gate,
+                    patch.object(app, "BedrockGuardrailSystem") as constructor,
+                ):
+                    response = app.lambda_handler(event, None)
+                self.assertEqual(response["statusCode"], 503)
+                gate.assert_called_once_with()
+                constructor.assert_not_called()
+                self.assertIsNone(app._LAMBDA_SYSTEM)
+        with tempfile.TemporaryDirectory() as directory:
+            for event in events:
+                with (
+                    self.subTest(valid_profile_event=event),
+                    patch.dict(os.environ, self.environment(directory), clear=True),
+                    patch.object(
+                        app.RuntimeConfig,
+                        "from_lambda_env",
+                        wraps=app.RuntimeConfig.from_lambda_env,
+                    ) as gate,
+                    patch.object(app, "BedrockGuardrailSystem") as constructor,
+                ):
+                    response = app.lambda_handler(event, None)
+                    self.assertEqual(response["statusCode"], 400)
+                    gate.assert_called_once_with()
+                    constructor.assert_not_called()
 
     def test_valid_cold_start_passes_required_profile_and_body_cannot_override_it(self):
         with tempfile.TemporaryDirectory() as directory:

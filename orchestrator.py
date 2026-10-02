@@ -59,6 +59,7 @@ MAX_JWT_SEGMENT_CHARS = (4096, 32768, 8192)
 MAX_JWT_HEADER_CANDIDATES = 64
 MAX_OPAQUE_TOKEN_CHARS = 4096
 MAX_OPAQUE_TOKEN_CANDIDATES = 64
+MIN_BARE_BEARER_TOKEN_CHARS = 16
 
 logger = logging.getLogger("bedrock_guardrail_firewall")
 
@@ -1725,8 +1726,9 @@ MAX_PUBLIC_RESPONSE_BYTES = 1_048_576
 
 OPAQUE_TOKEN_LABEL = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
-    r"(?:access_token|refresh_token)['\"]?\s*[:=]\s*['\"]?"
-    r"|bearer\s+)(?P<value>[^\s'\"&<>,;()\[\]{}]+)",
+    r"(?P<field>access_token|refresh_token)['\"]?\s*[:=]\s*['\"]?"
+    r"|(?P<authorization>authorization['\"]?\s*:\s*['\"]?)?"
+    r"bearer\s+)(?P<value>[^\s'\"&<>,;()\[\]{}]+)",
     re.IGNORECASE | re.ASCII,
 )
 OPAQUE_TOKEN_ALPHABET = re.compile(r"[A-Za-z0-9._~+/=-]+", re.ASCII)
@@ -1961,6 +1963,14 @@ class PrivacyEngine:
                 raise InputValidationError("Opaque credential exceeds candidate budget")
             value = match.group("value")
             if value.lower() in OPAQUE_TOKEN_PLACEHOLDERS:
+                continue
+            if (
+                match.group("field") is None
+                and match.group("authorization") is None
+                and len(value) < MIN_BARE_BEARER_TOKEN_CHARS
+            ):
+                # Bare scheme-like prose (for example bearer bonds) is common.
+                # Explicit credential fields/headers still contain short values.
                 continue
             entity_type = "OPAQUE_TOKEN"
             if value.count(".") == 2 and _jwt_credential_like(value):
@@ -5027,6 +5037,9 @@ def lambda_handler(event: Any, context: Any) -> dict[str, Any]:
     del context
     global _LAMBDA_SYSTEM
     try:
+        runtime_config = (
+            RuntimeConfig.from_lambda_env() if _LAMBDA_SYSTEM is None else None
+        )
         if not isinstance(event, dict):
             raise InputValidationError("Lambda event must be an object")
         raw_body = event.get("body", event)
@@ -5081,7 +5094,8 @@ def lambda_handler(event: Any, context: Any) -> dict[str, Any]:
             safe_body_context["request_id"] = body["request_id"]
 
         if _LAMBDA_SYSTEM is None:
-            runtime_config = RuntimeConfig.from_lambda_env()
+            if runtime_config is None:
+                raise ConfigurationError("Lambda startup profile is unavailable")
             _LAMBDA_SYSTEM = BedrockGuardrailSystem(
                 runtime_config,
                 live_aws_authorized=runtime_config.aws_mode == "live",

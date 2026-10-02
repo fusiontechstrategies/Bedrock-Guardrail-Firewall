@@ -262,6 +262,9 @@ The command-line and library defaults keep runtime state in `.guardrail-data` un
 
 Lambda treats deployment-time `GUARDRAIL_AWS_MODE=live` as operator authorization. Protect environment and deployment permissions accordingly.
 
+Startup configuration is checked before parsing the first event. Malformed
+payloads rejected before request processing do not create audit event records.
+
 The handler accepts only these body fields:
 
 - `user_input`

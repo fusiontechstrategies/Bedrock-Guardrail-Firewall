@@ -92,14 +92,24 @@ and `redacted` are excluded, case-insensitively. Unlabelled arbitrary strings an
 encoded or split credential formats outside this grammar are not a detection
 guarantee. Recognition contains text; it does not authenticate a credential.
 
+Bare `Bearer` values must be at least 16 characters, so ordinary phrases such as
+`bearer bonds`, `bearer shares`, and `bearer plant` remain unchanged. Explicit
+`Authorization: Bearer` headers (including quoted JSON headers), `access_token`,
+and `refresh_token` fields contain shorter values too. Short bare Bearer values
+are outside the supported grammar; this threshold is not an entropy test.
+
 Lambda cold startup requires `GUARDRAIL_REMOTE_AUDIT_REQUIRED=true`, a remote
 audit bucket, live AWS mode, and an injected stable privacy HMAC key. Request data
 cannot select a local-only audit profile. Failed required delivery blocks content
 release; this control does not prove that a deployment's S3 retention or IAM policy
 was configured correctly.
+The startup requirement is checked before malformed-event admission. Malformed
+payloads rejected before request processing do not create audit event records.
 
 Release verification parses full PEP 508 requirements and compares complete
 canonical optional markers with reviewed `pyproject.toml` metadata and exact pins.
+Trusted publication verification installs hashed parser pins from the trusted
+default-branch checkout into a fresh virtual environment and runs in isolated mode.
 Only the supported extra equality and reviewed Python-version conjunction are
 admitted; broadened/disjunctive/duplicate predicates are refused. Archive paths
 containing `~` followed by an ASCII digit are conservatively refused in wheels,

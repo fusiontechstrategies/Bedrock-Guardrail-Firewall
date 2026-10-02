@@ -41,6 +41,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install trusted verification parsers in an isolated environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/release-verifier"
+          "$RUNNER_TEMP/release-verifier/bin/python" -m pip install \
+            --disable-pip-version-check --only-binary=:all: --require-hashes \
+            -r trusted-verifier/requirements-verifier.lock
+
       - name: Verify the tagged source commit
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
@@ -89,7 +98,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -I trusted-verifier/scripts/prepare_release_evidence.py \
+          "$RUNNER_TEMP/release-verifier/bin/python" -I trusted-verifier/scripts/prepare_release_evidence.py \
             --source-directory . \
             --tag "$RELEASE_TAG" \
             --commit "$RELEASE_COMMIT" \
