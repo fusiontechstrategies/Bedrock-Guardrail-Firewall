@@ -92,7 +92,7 @@ jobs:
         run: pip-audit -r requirements-dev.txt --progress-spinner off
 
       - name: Audit distribution build dependencies
-        run: pip-audit -r requirements-build.txt --progress-spinner off
+        run: pip-audit -r requirements-build.lock --progress-spinner off
 
   package:
     name: Build and install package

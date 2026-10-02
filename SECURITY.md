@@ -46,7 +46,10 @@ The project follows these defaults:
 - Audit and review records contain metadata, not raw content.
 - Public responses exclude local paths and remote resource names.
 - Local audit records form a hash chain.
-- Runtime input and state are bounded.
+- Runtime input and state are bounded. CLI files must be regular files; stdin is capped at 1 MiB with a ten-second stream completion deadline.
+- Audit event records receive owner-only protection before their first byte is written. Existing unsafe event-file ownership, links, or broad permissions fail closed. On Windows, protect the audit directory with an owner-only ACL as a deployment step; the chain summary uses the directory permissions and contains no request content, only schema metadata, the last hash, and a timestamp.
+- Release verification runs trusted default-branch tools and reauthenticates distribution provenance immediately before publication.
+- Release tools use a hashed dependency closure and non-isolated builds to prevent index resolution during packaging.
 - Optional dependencies are pinned and continuously audited.
 
 See [Threat Model](docs/THREAT_MODEL.md) for trust boundaries, assumptions, residual risk, and deployment responsibilities.

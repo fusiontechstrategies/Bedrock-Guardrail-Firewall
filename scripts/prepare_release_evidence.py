@@ -115,6 +115,10 @@ def validate_source_identity(source_root: Path, tag: str) -> str:
 
 
 def archive_parts(name: str) -> tuple[str, ...]:
+    require(
+        ":" not in name,
+        f"Archive member contains a drive path or Windows stream alias: {name!r}",
+    )
     require("\\" not in name, f"Archive member uses a backslash: {name!r}")
     require(not name.startswith("/"), f"Archive member is absolute: {name!r}")
     require(
@@ -754,6 +758,7 @@ def prepare_release_evidence(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--source-directory", type=Path, default=ROOT)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--dist-directory", type=Path, default=Path("dist"))
@@ -762,7 +767,7 @@ def main() -> int:
     )
     arguments = parser.parse_args()
     evidence = prepare_release_evidence(
-        ROOT,
+        arguments.source_directory,
         arguments.dist_directory,
         arguments.output_directory,
         arguments.tag,

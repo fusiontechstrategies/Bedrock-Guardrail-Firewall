@@ -11,6 +11,209 @@ from tests.test_orchestrator import FakeBedrockClient, GuardrailTestCase
 
 
 class SecurityRegressionTests(GuardrailTestCase):
+    def test_policy_phrase_spacing_cannot_bypass_blocking_or_masking(self):
+        from dataclasses import replace
+
+        system = self.make_system()
+        bundle = replace(
+            system.bundle,
+            blocked_terms=("internal secret",),
+            masked_terms=("secret phrase",),
+        )
+        engine = app.LocalPolicyEngine(bundle, system.profile)
+        for spacing in (" ", "  ", "\t", "\n", "\r\n", "\u2003"):
+            with self.subTest(spacing=spacing):
+                _, blocked = engine.evaluate(f"internal{spacing}secret", "input")
+                self.assertTrue(
+                    any(item.category == "blocked_term" for item in blocked)
+                )
+                masked, detections = engine.evaluate(f"secret{spacing}phrase", "input")
+                self.assertEqual(masked, "[POLICY_TERM_REDACTED]")
+                self.assertTrue(
+                    any(item.category == "masked_term" for item in detections)
+                )
+
+    def test_control_whitespace_policy_phrases_on_all_routes(self):
+        from dataclasses import replace
+
+        for spacing in ("\v", "\f", "\x1c", "\x1d", "\x1e", "\x1f", "\x85"):
+            for field in ("input", "output", "retrieval"):
+                for masked in (False, True):
+                    with self.subTest(
+                        spacing=repr(spacing), field=field, masked=masked
+                    ):
+                        client = FakeBedrockClient()
+                        system = self.make_live_system(client)
+                        system.bundle = replace(
+                            system.bundle,
+                            blocked_terms=() if masked else ("internal secret",),
+                            masked_terms=("secret phrase",) if masked else (),
+                        )
+                        system.local_policy = app.LocalPolicyEngine(
+                            system.bundle, system.profile
+                        )
+                        text = (
+                            f"secret{spacing}phrase"
+                            if masked
+                            else f"internal{spacing}secret"
+                        )
+                        result = system.process(
+                            text if field == "input" else "hello",
+                            {
+                                "retrieval_contexts": [
+                                    {
+                                        "id": "fixture",
+                                        "text": text
+                                        + " Reference supports this answer.",
+                                    }
+                                ]
+                            }
+                            if field == "retrieval"
+                            else {},
+                            text
+                            if field == "output"
+                            else "Reference supports this answer. [fixture]"
+                            if field == "retrieval"
+                            else "",
+                            record=False,
+                        )
+                        if masked:
+                            self.assertNotIn(text, json.dumps(result))
+                            if field != "retrieval":
+                                self.assertIn(
+                                    "[POLICY_TERM_REDACTED]", json.dumps(result)
+                                )
+                            self.assertTrue(
+                                any(
+                                    item["category"] == "masked_term"
+                                    for item in result["detections"]
+                                )
+                            )
+                            self.assertNotIn(text, json.dumps(client.calls))
+                            if field == "retrieval":
+                                self.assertIn(
+                                    "[POLICY_TERM_REDACTED]", json.dumps(client.calls)
+                                )
+                        else:
+                            self.assertFalse(result["content_released"])
+                            self.assertTrue(
+                                any(
+                                    item["category"] == "blocked_term"
+                                    for item in result["detections"]
+                                )
+                            )
+                            self.assertEqual(client.calls, [])
+
+    def test_empty_normalized_policy_terms_are_rejected_and_boundaries_are_canonical(
+        self,
+    ):
+        for term in ("\u200b", "\x01", "\u200b\x01", "\v\x1f"):
+            with self.subTest(term=repr(term)):
+                with self.assertRaises(app.ConfigurationError):
+                    app.LocalPolicyEngine._term_pattern(term)
+                for field in ("policy.blocked_terms", "policy.masked_terms"):
+                    with self.assertRaises(app.ConfigurationError):
+                        app._validate_string_list([term], field)
+        pattern = app.LocalPolicyEngine._term_pattern("\u200bsecret\x01")
+        self.assertIsNotNone(pattern.search("a secret here"))
+        self.assertIsNone(pattern.search("notasecretthing"))
+
+    def test_standard_app_tokens_and_pgp_private_keys_never_reach_bedrock(self):
+        for secret in (
+            "xapp-1-" + "A" * 32,
+            (
+                "-----BEGIN PGP PRIVATE KEY BLOCK-----\n"
+                "Synthetic private armor\n-----END PGP PRIVATE KEY BLOCK-----"
+            ),
+        ):
+            for field in ("input", "output", "retrieval"):
+                with self.subTest(secret=secret[:20], field=field):
+                    client = FakeBedrockClient()
+                    system = self.make_live_system(client)
+                    result = system.process(
+                        secret if field == "input" else "hello",
+                        {"retrieval_contexts": [{"id": "fixture", "text": secret}]}
+                        if field == "retrieval"
+                        else {},
+                        secret if field == "output" else "",
+                        record=False,
+                    )
+                    self.assertFalse(result["content_released"])
+                    self.assertEqual(client.calls, [])
+
+    def test_cli_limits_utf8_stream_bytes_and_regular_file_reads(self):
+        import io
+
+        with (
+            patch.object(
+                app.sys, "stdin", io.StringIO("a" * (app.MAX_CLI_INPUT_BYTES + 1))
+            ),
+            self.assertRaisesRegex(app.InputValidationError, "too large"),
+        ):
+            app._read_cli_text("-", None, "input")
+        with (
+            patch.object(
+                app.sys, "stdin", io.StringIO("é" * (app.MAX_CLI_INPUT_BYTES // 2 + 1))
+            ),
+            self.assertRaisesRegex(app.InputValidationError, "too large"),
+        ):
+            app._read_cli_text("-", None, "input")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "large.txt"
+            path.write_bytes(b"a" * (app.MAX_CLI_INPUT_BYTES + 1))
+            with self.assertRaisesRegex(app.InputValidationError, "too large"):
+                app._read_cli_text(str(path), None, "input")
+            path.write_bytes(b"\xff")
+            with self.assertRaisesRegex(app.InputValidationError, "UTF-8"):
+                app._read_cli_text(str(path), None, "input")
+
+    def test_cli_open_pipe_has_a_completion_deadline(self):
+        import os
+        import time
+
+        read_fd, write_fd = os.pipe()
+        try:
+            with (
+                os.fdopen(read_fd, "r") as stream,
+                patch.object(app.sys, "stdin", stream),
+                patch.object(app, "CLI_STREAM_TIMEOUT_SECONDS", 0.05),
+            ):
+                started = time.monotonic()
+                with self.assertRaisesRegex(app.InputValidationError, "deadline"):
+                    app._read_cli_text("-", None, "input")
+                self.assertLess(time.monotonic() - started, 1.0)
+        finally:
+            os.close(write_fd)
+
+    def test_cli_open_descriptor_rejects_special_files(self):
+        import os
+
+        path = "NUL" if os.name == "nt" else "/dev/null"
+        with self.assertRaisesRegex(app.InputValidationError, "regular"):
+            app._read_cli_text(path, None, "input")
+
+    def test_audit_private_descriptor_is_ready_before_first_content_write(self):
+        import os
+
+        system = self.make_system()
+        original = app._open_private_key
+        seen = []
+
+        def observe(path, *, create):
+            fd = original(path, create=create)
+            if path == system.audit.events_path:
+                info = os.fstat(fd)
+                seen.append((create, info.st_size, info.st_mode & 0o077))
+            return fd
+
+        with patch.object(app, "_open_private_key", side_effect=observe):
+            system.process("hello")
+            system.process("hello again")
+        self.assertEqual(seen[0][:2], (True, 0))
+        self.assertFalse(seen[1][0])
+        if os.name != "nt":
+            self.assertTrue(all(mode == 0 for _, _, mode in seen))
+
     def test_block_queue_is_exactly_l3_even_in_monitor_mode(self):
         from tests.test_orchestrator import RecordingClient
 
