@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import csv
 import hashlib
@@ -11,12 +12,21 @@ import io
 import json
 import re
 import stat
+import sys
 import tarfile
 import unicodedata
 import zipfile
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
+
+from packaging.markers import Marker
+from packaging.requirements import InvalidRequirement, Requirement
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_NAME = "bedrock-guardrail-firewall"
@@ -134,6 +144,10 @@ def archive_parts(name: str) -> tuple[str, ...]:
     )
     for part in raw_parts:
         require(
+            re.search(r"~[0-9]", part) is None,
+            f"Archive member contains a Windows short-name alias: {name!r}",
+        )
+        require(
             not part.endswith((" ", ".")),
             f"Archive member is not portable across filesystems: {name!r}",
         )
@@ -203,6 +217,80 @@ def normalize_distribution_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def canonical_optional_marker(marker: Marker | None) -> str:
+    """Admit the complete reviewed conjunction, after PEP 508 parsing."""
+    if marker is None:
+        return ""
+    rendered = str(marker)
+    require(len(rendered) <= 512, "Optional marker exceeds its work budget")
+    try:
+        expression = ast.parse(rendered, mode="eval").body
+    except (SyntaxError, ValueError, RecursionError) as exc:
+        raise ReleaseEvidenceError("Unsupported optional marker") from exc
+
+    def terms(node):
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+            return [term for child in node.values for term in terms(child)]
+        require(
+            isinstance(node, ast.Compare)
+            and len(node.ops) == len(node.comparators) == 1,
+            "Unsupported optional marker expression",
+        )
+        left, right, operator = node.left, node.comparators[0], node.ops[0]
+        if isinstance(left, ast.Constant) and isinstance(right, ast.Name):
+            left, right = right, left
+            if isinstance(operator, ast.Gt):
+                operator = ast.Lt()
+            elif isinstance(operator, ast.Lt):
+                operator = ast.Gt()
+        require(
+            isinstance(left, ast.Name)
+            and isinstance(right, ast.Constant)
+            and isinstance(right.value, str),
+            "Unsupported optional marker operands",
+        )
+        if left.id == "extra":
+            require(
+                isinstance(operator, ast.Eq)
+                and right.value in OPTIONAL_REQUIREMENT_FILES,
+                "Unsupported optional extra comparison",
+            )
+            return [("extra", "==", right.value)]
+        require(
+            left.id == "python_version"
+            and isinstance(operator, ast.Lt)
+            and right.value == "3.14",
+            "Unsupported optional Python-version comparison",
+        )
+        return [("python_version", "<", right.value)]
+
+    parsed = terms(expression)
+    require(
+        len(parsed) <= 2 and len(set(parsed)) == len(parsed),
+        "Duplicate or excessive optional marker terms",
+    )
+    return " and ".join(
+        f"{variable} {operator} {json.dumps(value)}"
+        for variable, operator, value in sorted(parsed)
+    )
+
+
+def pinned_requirement(value: str) -> Requirement:
+    require(len(value) <= 1024, "Optional requirement exceeds its work budget")
+    try:
+        parsed = Requirement(value)
+    except (InvalidRequirement, RecursionError) as exc:
+        raise ReleaseEvidenceError("Invalid PEP 508 optional requirement") from exc
+    require(
+        not parsed.extras
+        and parsed.url is None
+        and PINNED_REQUIREMENT.fullmatch(parsed.name + str(parsed.specifier))
+        is not None,
+        "Optional requirement is not an exact package pin",
+    )
+    return parsed
+
+
 def parse_optional_dependencies(source_root: Path) -> list[dict[str, str]]:
     dependencies: list[dict[str, str]] = []
     normalized_names: set[str] = set()
@@ -242,6 +330,56 @@ def parse_optional_dependencies(source_root: Path) -> list[dict[str, str]]:
                 }
             )
         require(group_count > 0, f"No package dependencies found in {filename}")
+    try:
+        document = tomllib.loads((source_root / "pyproject.toml").read_text("utf-8"))
+        optional = document["project"]["optional-dependencies"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ReleaseEvidenceError(
+            "Reviewed optional dependency metadata is invalid"
+        ) from exc
+    require(
+        isinstance(optional, dict) and set(optional) == set(OPTIONAL_REQUIREMENT_FILES),
+        "Reviewed optional dependency groups differ",
+    )
+    declared: dict[tuple[str, str, str], str] = {}
+    for group, values in optional.items():
+        require(
+            isinstance(values, list) and bool(values),
+            "Invalid optional dependency list",
+        )
+        for value in values:
+            require(isinstance(value, str), "Optional dependency must be text")
+            parsed = pinned_requirement(value)
+            source_marker = canonical_optional_marker(parsed.marker)
+            require(
+                "extra" not in source_marker, "Source marker cannot select an extra"
+            )
+            marker = canonical_optional_marker(
+                Marker(
+                    (source_marker + " and " if source_marker else "")
+                    + f'extra == "{group}"'
+                )
+            )
+            key = (
+                normalize_distribution_name(parsed.name),
+                str(parsed.specifier)[2:],
+                group,
+            )
+            require(key not in declared, "Duplicate reviewed optional dependency")
+            declared[key] = marker
+    require(
+        set(declared)
+        == {
+            (item["normalized_name"], item["version"], item["group"])
+            for item in dependencies
+        },
+        "Reviewed pyproject optional dependencies do not match "
+        "pinned requirement files",
+    )
+    for item in dependencies:
+        item["marker"] = declared[
+            (item["normalized_name"], item["version"], item["group"])
+        ]
     return sorted(dependencies, key=lambda item: item["normalized_name"])
 
 
@@ -297,6 +435,7 @@ def parse_wheel_dependencies(document) -> list[dict[str, str]]:
     normalized_names: set[str] = set()
     for raw_requirement in document.get_all("Requires-Dist") or []:
         requirement = str(raw_requirement)
+        parsed = pinned_requirement(requirement)
         package, separator, marker = requirement.partition(";")
         match = PINNED_REQUIREMENT.fullmatch(package.strip())
         require(
@@ -307,7 +446,8 @@ def parse_wheel_dependencies(document) -> list[dict[str, str]]:
             bool(separator and marker.strip()),
             "Wheel optional dependency lacks a marker",
         )
-        groups = re.findall(r"""extra\s*==\s*["']([^"']+)["']""", marker)
+        canonical_marker = canonical_optional_marker(parsed.marker)
+        groups = re.findall(r'extra == "([^"]+)"', canonical_marker)
         require(
             len(groups) == 1 and groups[0] in OPTIONAL_REQUIREMENT_FILES,
             f"Wheel dependency has an unsupported extra marker: {requirement!r}",
@@ -322,7 +462,7 @@ def parse_wheel_dependencies(document) -> list[dict[str, str]]:
         dependencies.append(
             {
                 "group": groups[0],
-                "marker": marker.strip(),
+                "marker": canonical_marker,
                 "name": name,
                 "normalized_name": normalized,
                 "version": version,
@@ -417,11 +557,11 @@ def validate_wheel(
     require(metadata["Version"] == version, "Wheel metadata version mismatch")
     dependencies = parse_wheel_dependencies(metadata)
     expected_identity = {
-        (item["normalized_name"], item["version"], item["group"])
+        (item["normalized_name"], item["version"], item["group"], item["marker"])
         for item in expected_dependencies
     }
     actual_identity = {
-        (item["normalized_name"], item["version"], item["group"])
+        (item["normalized_name"], item["version"], item["group"], item["marker"])
         for item in dependencies
     }
     require(

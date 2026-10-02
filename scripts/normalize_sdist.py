@@ -37,6 +37,10 @@ def validate_member_name(name: str) -> None:
     )
     parts = name.rstrip("/").split("/")
     require(
+        all(re.search(r"~[0-9]", part) is None for part in parts),
+        f"Archive member contains a Windows short-name alias: {name!r}",
+    )
+    require(
         bool(parts) and all(part not in {"", ".", ".."} for part in parts),
         f"Archive member traverses or aliases a path: {name!r}",
     )

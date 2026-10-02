@@ -36,13 +36,15 @@ python -m venv .venv
 python -m pip install --upgrade pip
 ```
 
-The offline core requires no runtime package installation.
+The offline core requires no runtime package installation. The full source test
+suite additionally installs the pinned release evidence parsers.
 
 Validate it:
 
 ```powershell
 python orchestrator.py --presidio-mode disabled doctor
 python orchestrator.py policy-validate
+python -m pip install -r requirements-verifier.txt
 python -m unittest discover -s tests -v
 python orchestrator.py --presidio-mode disabled red-team
 ```
@@ -248,7 +250,10 @@ Recommended configuration:
 - Put Presidio and its NLP model in a Lambda layer or container image if required.
 - Set `GUARDRAIL_DATA_DIR` to `/tmp/guardrail-data`.
 - Inject a stable `GUARDRAIL_PRIVACY_HMAC_KEY_B64` value.
-- Require remote audit delivery because `/tmp` is ephemeral.
+- Set `GUARDRAIL_REMOTE_AUDIT_REQUIRED=true`, `GUARDRAIL_AUDIT_BUCKET` to the
+  approved durable destination, and `GUARDRAIL_AWS_MODE=live`. Lambda cold startup
+  refuses missing requirements or a missing stable privacy HMAC key because `/tmp`
+  is ephemeral. There is no request-selectable local-only audit override.
 - Set reserved concurrency and API throttles appropriate to the workload.
 - Use an authorizer to provide classification, role, clearance, tenant, and user identity.
 - Disable payload logging in API Gateway and Lambda observability configurations.
