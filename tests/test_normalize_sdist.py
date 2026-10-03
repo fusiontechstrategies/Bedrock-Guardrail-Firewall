@@ -38,7 +38,11 @@ class NormalizeSdistTests(unittest.TestCase):
             self.assertEqual(normalized, first.read_bytes())
             with tarfile.open(first, mode="r:gz") as archive:
                 members = archive.getmembers()
-            self.assertEqual([member.mtime for member in members], [50, 50])
+            self.assertEqual([member.mtime for member in members], [0, 0])
+            self.assertEqual(int.from_bytes(normalized[4:8], "little"), 50)
+            self.assertTrue(all(m.uid == m.gid == 0 for m in members))
+            self.assertTrue(all(m.uname == m.gname == "" for m in members))
+            self.assertTrue(all(not m.pax_headers for m in members))
             self.assertEqual([member.mode for member in members], [0o755, 0o644])
 
     def test_link_member_is_rejected_without_changing_archive(self):

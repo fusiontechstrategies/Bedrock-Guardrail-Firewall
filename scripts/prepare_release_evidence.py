@@ -10,12 +10,14 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
 import stat
 import sys
 import tarfile
 import unicodedata
 import zipfile
+import zlib
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
@@ -476,6 +478,8 @@ def validate_wheel(
     version: str,
     expected_dependencies: list[dict[str, str]],
     source_root: Path | None = None,
+    *,
+    snapshot: bytes | None = None,
 ) -> list[dict[str, str]]:
     metadata_values: list[bytes] = []
     record_values: list[tuple[str, bytes]] = []
@@ -486,7 +490,9 @@ def validate_wheel(
         "bedrock_guardrail_firewall/guardrail_policy_profiles.json",
         "bedrock_guardrail_firewall/py.typed",
     }
-    with zipfile.ZipFile(path) as archive:
+    with zipfile.ZipFile(
+        io.BytesIO(snapshot) if snapshot is not None else path
+    ) as archive:
         names: set[str] = set()
         portable_names: set[str] = set()
         file_values: dict[str, bytes] = {}
@@ -609,13 +615,331 @@ def validate_wheel(
     return dependencies
 
 
-def validate_sdist(path: Path, version: str, source_root: Path | None = None) -> None:
+def reviewed_sdist_sources(source_root: Path) -> dict[str, bytes]:
+    """Interpret only static inclusion rules; never import or run build hooks."""
+    paths = {"__init__.py", "orchestrator.py", "pyproject.toml", "MANIFEST.in"}
+    manifest = source_root / "MANIFEST.in"
+    require(
+        manifest.is_file() and not manifest.is_symlink(),
+        "Reviewed MANIFEST.in is missing",
+    )
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if not parts or parts[0].startswith("#"):
+            continue
+        if parts[0] == "include" and len(parts) >= 2:
+            for pattern in parts[1:]:
+                require(
+                    "/" not in pattern and "\\" not in pattern,
+                    "Unsupported manifest pattern",
+                )
+                paths.update(
+                    path.name for path in source_root.glob(pattern) if path.is_file()
+                )
+        elif parts[0] == "recursive-include" and len(parts) >= 3:
+            directory = parts[1]
+            require(
+                not (source_root / directory).is_symlink(),
+                "Reviewed source directory is linked",
+            )
+            require(
+                directory in {"docs", "examples", "scripts", "tests"},
+                "Unsupported manifest directory",
+            )
+            for pattern in parts[2:]:
+                require(
+                    "/" not in pattern and "\\" not in pattern,
+                    "Unsupported manifest pattern",
+                )
+                paths.update(
+                    path.relative_to(source_root).as_posix()
+                    for path in (source_root / directory).rglob(pattern)
+                    if path.is_file()
+                )
+        else:
+            raise ReleaseEvidenceError("Unsupported source manifest directive")
+    values = {}
+    for name in sorted(paths):
+        validate_public_member(name)
+        path = source_root / name
+        require(
+            path.is_file()
+            and all(not item.is_symlink() for item in (path, *path.parents)),
+            f"Reviewed source is missing or linked: {name!r}",
+        )
+        values[name] = path.read_bytes()
+    return values
+
+
+def generated_sdist_members(
+    source_root: Path, sources: dict[str, bytes]
+) -> dict[str, bytes]:
+    """Construct the pinned backend's static metadata without invoking it."""
+    project = tomllib.loads(sources["pyproject.toml"].decode("utf-8"))["project"]
+    require(not project.get("dynamic"), "Dynamic project metadata is not approved")
+    require(project.get("name") == PROJECT_NAME, "Unexpected source project name")
+    fields = [
+        ("Metadata-Version", "2.4"),
+        ("Name", project["name"]),
+        ("Version", project["version"]),
+    ]
+    if project.get("description"):
+        fields.append(("Summary", project["description"]))
+    authors = project.get("authors", [])
+    require(
+        all(set(item) <= {"name"} for item in authors), "Unsupported author metadata"
+    )
+    if authors:
+        fields.append(("Author", ", ".join(item["name"] for item in authors)))
+    require(project.get("license") == "Apache-2.0", "Unsupported source license")
+    fields.append(("License-Expression", project["license"]))
+    fields += [
+        ("Project-URL", f"{name}, {value}")
+        for name, value in project.get("urls", {}).items()
+    ]
+    if project.get("keywords"):
+        fields.append(("Keywords", ",".join(project["keywords"])))
+    fields += [("Classifier", value) for value in project.get("classifiers", [])]
+    fields += [
+        ("Requires-Python", project["requires-python"]),
+        ("Description-Content-Type", "text/markdown"),
+    ]
+    license_files = project.get("license-files", [])
+    fields += [("License-File", value) for value in license_files]
+    optional = project.get("optional-dependencies", {})
+    requirements = []
+    for group, items in optional.items():
+        fields.append(("Provides-Extra", group))
+        markers = {}
+        for raw in items:
+            req = Requirement(raw)
+            marker = str(req.marker) if req.marker else ""
+            req.marker = None
+            rendered = str(req)
+            fields.append(
+                (
+                    "Requires-Dist",
+                    rendered
+                    + "; "
+                    + (marker + " and " if marker else "")
+                    + f'extra == "{group}"',
+                )
+            )
+            markers.setdefault(marker, []).append(rendered)
+        requirements.append("\n[" + group + "]\n")
+        requirements.extend(item + "\n" for item in markers.pop("", []))
+        for marker, marker_items in sorted(markers.items()):
+            requirements.append("\n[" + group + ":" + marker + "]\n")
+            requirements.extend(item + "\n" for item in marker_items)
+    if license_files:
+        fields.append(("Dynamic", "license-file"))
+    require(project.get("readme") == "README.md", "Unsupported source README")
+    require(
+        all(
+            isinstance(value, str) and "\n" not in value and "\r" not in value
+            for _, value in fields
+        ),
+        "Invalid generated metadata field",
+    )
+    readme = sources["README.md"].decode("utf-8").replace("\r\n", "\n")
+    metadata = (
+        "".join(f"{key}: {value}\n" for key, value in fields) + "\n" + readme
+    ).encode("utf-8")
+    egg = ARCHIVE_NAME + ".egg-info/"
+    generated = {
+        "PKG-INFO": metadata,
+        egg + "PKG-INFO": metadata,
+        egg + "dependency_links.txt": b"\n",
+        egg + "entry_points.txt": (
+            b"[console_scripts]\nbedrock-guardrail-firewall = "
+            b"bedrock_guardrail_firewall.orchestrator:main\n"
+        ),
+        egg + "top_level.txt": (ARCHIVE_NAME + "\n").encode(),
+        "setup.cfg": b"[egg_info]\ntag_build = \ntag_date = 0\n\n",
+    }
+    require(
+        project.get("scripts")
+        == {
+            "bedrock-guardrail-firewall": "bedrock_guardrail_firewall.orchestrator:main"
+        },
+        "Unsupported source entry points",
+    )
+    if optional:
+        generated[egg + "requires.txt"] = "".join(requirements).encode()
+    package_files = (
+        "__init__.py",
+        "orchestrator.py",
+        "guardrail_policy.json",
+        "guardrail_policy_profiles.json",
+        "py.typed",
+    )
+    source_list = (
+        set(sources)
+        | {"./" + name for name in package_files}
+        | {name for name in generated if name.startswith(egg)}
+        | {egg + "SOURCES.txt"}
+    )
+    # setuptools FileList sorts by directory, then basename, preserving ./ aliases
+    # in metadata only. Archive paths themselves must remain canonical.
+    generated[egg + "SOURCES.txt"] = (
+        "\n".join(
+            sorted(
+                source_list,
+                key=lambda name: (name.rpartition("/")[0], name.rpartition("/")[2]),
+            )
+        )
+    ).encode()
+    return generated
+
+
+MAX_RELEASE_ARTIFACT_BYTES = 64 * 1024 * 1024
+MAX_RELEASE_TAR_BYTES = 128 * 1024 * 1024
+
+
+def artifact_snapshot(path: Path) -> bytes:
+    """Bind validation, digest and size to bounded bytes from one descriptor."""
+    if os.name == "nt":
+        import ctypes
+        import ctypes.wintypes as wintypes
+        import msvcrt
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.CreateFileW(str(path), 0x80000000, 3, None, 3, 0x00200000, None)
+        require(handle != wintypes.HANDLE(-1).value, "Unable to open distribution")
+        try:
+            fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+            handle = None
+        finally:
+            if handle is not None:
+                kernel.CloseHandle(handle)
+    else:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        require(
+            stat.S_ISREG(info.st_mode)
+            and info.st_nlink == 1
+            and not (
+                getattr(info, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            ),
+            "Distribution must be a single unlinked regular file",
+        )
+        require(
+            info.st_size <= MAX_RELEASE_ARTIFACT_BYTES,
+            "Distribution exceeds byte budget",
+        )
+        value = stream.read(MAX_RELEASE_ARTIFACT_BYTES + 1)
+        require(
+            len(value) <= MAX_RELEASE_ARTIFACT_BYTES, "Distribution exceeds byte budget"
+        )
+        return value
+
+
+def checked_tar_container(path: Path, compressed: bytes) -> bytes:
+    require(
+        compressed[:3] == b"\x1f\x8b\x08" and len(compressed) >= 18,
+        "Source distribution must be one gzip stream",
+    )
+    flags = compressed[3]
+    require(flags in {0, 8}, "Unapproved gzip extra, comment or flags")
+    if flags == 8:
+        end = compressed.find(b"\0", 10, 1035)
+        require(
+            end >= 10 and compressed[10:end] == path.name[:-3].encode(),
+            "Unapproved gzip filename",
+        )
+    try:
+        decoder = zlib.decompressobj(31)
+        raw = decoder.decompress(compressed, MAX_RELEASE_TAR_BYTES + 1)
+    except zlib.error as exc:
+        raise ReleaseEvidenceError("Invalid source gzip stream") from exc
+    require(
+        len(raw) <= MAX_RELEASE_TAR_BYTES
+        and decoder.eof
+        and not decoder.unused_data
+        and not decoder.unconsumed_tail,
+        "Source gzip has trailing data or exceeds budget",
+    )
+    offset = 0
+    while offset + 512 <= len(raw):
+        block = raw[offset : offset + 512]
+        if block == b"\0" * 512:
+            require(
+                len(raw) - offset >= 1024
+                and len(raw) % 512 == 0
+                and not any(raw[offset:]),
+                "Source tar has trailing data or incomplete end markers",
+            )
+            return raw
+        try:
+            member = tarfile.TarInfo.frombuf(block, "utf-8", "strict")
+        except (tarfile.HeaderError, UnicodeError) as exc:
+            raise ReleaseEvidenceError("Invalid source tar header") from exc
+        require(
+            0 <= member.size <= MAX_RELEASE_TAR_BYTES, "Source tar size exceeds budget"
+        )
+        payload_end = offset + 512 + member.size
+        next_offset = offset + 512 + ((member.size + 511) // 512) * 512
+        require(next_offset <= len(raw), "Truncated source tar member")
+        require(
+            not any(raw[payload_end:next_offset]), "Noncanonical tar member padding"
+        )
+        require(
+            (member.isfile() or member.isdir())
+            and member.uid == member.gid == member.mtime == 0
+            and member.uname == member.gname == member.linkname == ""
+            and member.devmajor == member.devminor == 0
+            and not any(block[500:]),
+            "Unapproved source tar type, ownership or timestamp metadata",
+        )
+        offset = next_offset
+    raise ReleaseEvidenceError("Source tar is missing complete end markers")
+
+
+def validate_sdist(
+    path: Path,
+    version: str,
+    source_root: Path | None = None,
+    *,
+    snapshot: bytes | None = None,
+) -> None:
     expected_root = f"{ARCHIVE_NAME}-{version}"
-    metadata_values: list[bytes] = []
-    names: set[str] = set()
-    with tarfile.open(path, mode="r:gz") as archive:
-        portable_names: set[str] = set()
-        for member in archive.getmembers():
+    expected = None
+    generated = {}
+    if source_root is not None:
+        expected = reviewed_sdist_sources(source_root)
+        generated = generated_sdist_members(source_root, expected)
+        expected = {**expected, **generated}
+    metadata_values = []
+    names = set()
+    files = set()
+    allowed_directories = {expected_root}
+    if expected is not None:
+        for name in expected:
+            allowed_directories.update(
+                expected_root + "/" + parent.as_posix()
+                for parent in PurePosixPath(name).parents
+                if parent.as_posix() != "."
+            )
+    compressed = artifact_snapshot(path) if snapshot is None else snapshot
+    raw = checked_tar_container(path, compressed)
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+        require(not archive.pax_headers, "Global PAX metadata is not approved")
+        portable_names = set()
+        for member in archive:
+            require(not member.pax_headers, "Unapproved member PAX metadata")
             parts = validate_public_member(member.name)
             name = member.name.rstrip("/")
             require(
@@ -631,74 +955,74 @@ def validate_sdist(path: Path, version: str, source_root: Path | None = None) ->
             )
             portable_names.add(portable_name)
             require(
-                parts[0] == expected_root,
-                f"Source distribution has an unexpected root: {member.name!r}",
+                parts[0] == expected_root, "Source distribution has an unexpected root"
             )
             require(
                 member.isfile() or member.isdir(),
-                f"Source distribution contains a link or device: {member.name!r}",
+                "Source distribution contains a link or device",
             )
-            if source_root is not None and member.isfile():
-                relative = "/".join(parts[1:])
-                portable_relative = unicodedata.normalize("NFC", relative).casefold()
-                if portable_relative.endswith((".py", ".pth")) or portable_relative in {
-                    "pyproject.toml",
-                    "setup.cfg",
-                    "setup.py",
-                    "guardrail_policy.json",
-                    "guardrail_policy_profiles.json",
-                    "__init__.py",
-                    "py.typed",
-                }:
-                    require(
-                        relative == portable_relative,
-                        "Non-canonical executable source member",
-                    )
-                    handle = archive.extractfile(member)
-                    require(handle is not None, "Unable to read source member")
-                    value = handle.read()
-                    if (
-                        relative == "setup.cfg"
-                        and not (source_root / relative).exists()
-                    ):
-                        require(
-                            value.replace(b"\r\n", b"\n").strip()
-                            == b"[egg_info]\ntag_build = \ntag_date = 0",
-                            "Source distribution contains unexpected "
-                            "build configuration",
-                        )
-                    else:
-                        reviewed = source_root / relative
-                        require(
-                            reviewed.is_file()
-                            and not reviewed.is_symlink()
-                            and value == reviewed.read_bytes(),
-                            "Source distribution differs from reviewed source: "
-                            f"{relative!r}",
-                        )
-            if len(parts) == 2 and parts[-1] == "PKG-INFO":
-                handle = archive.extractfile(member)
-                require(handle is not None, "Unable to read source PKG-INFO")
-                metadata_values.append(handle.read())
+            if member.isdir():
+                require(
+                    expected is None or name in allowed_directories,
+                    "Source distribution contains an unreviewed directory",
+                )
+                require(
+                    member.mode == 0o755 and member.size == 0,
+                    "Source distribution has unsafe directory metadata",
+                )
+                continue
+            relative = "/".join(parts[1:])
+            files.add(relative)
+            if expected is not None:
+                require(
+                    relative in expected,
+                    f"Non-canonical or unreviewed source member: {relative!r}",
+                )
+                allowed_modes = {0o644}
+                if (
+                    relative not in generated
+                    and (source_root / relative).stat().st_mode & 0o111
+                ):
+                    allowed_modes.add(0o755)
+                require(
+                    member.mode in allowed_modes,
+                    "Source distribution has unsafe file mode",
+                )
+                # Platform newline translation is an explicit generated-metadata
+                # exception only. Every source-controlled byte remains exact.
+                approved = expected[relative]
+                alternatives = (
+                    {approved}
+                    if relative not in generated
+                    else {
+                        approved,
+                        approved.replace(b"\n", b"\r\n"),
+                        approved.replace(b"\n", b"\r\r\n"),
+                    }
+                )
+                require(
+                    member.size in {len(item) for item in alternatives},
+                    f"Source distribution differs from reviewed source: {relative!r}",
+                )
+            handle = archive.extractfile(member)
+            require(handle is not None, "Unable to read source member")
+            value = handle.read(member.size + 1)
+            require(len(value) == member.size, "Source member is truncated")
+            if expected is not None:
+                require(
+                    value in alternatives,
+                    f"Source distribution differs from reviewed source: {relative!r}",
+                )
+            if relative == "PKG-INFO":
+                metadata_values.append(value)
     require(
         len(metadata_values) == 1,
         "Source distribution must contain exactly one top-level PKG-INFO",
     )
-    if source_root is not None:
-        required_source = {
-            f"{expected_root}/{name}"
-            for name in (
-                "__init__.py",
-                "orchestrator.py",
-                "guardrail_policy.json",
-                "guardrail_policy_profiles.json",
-                "py.typed",
-                "pyproject.toml",
-            )
-        }
+    if expected is not None:
         require(
-            required_source.issubset(names),
-            "Source distribution is missing reviewed source",
+            files == set(expected),
+            "Source distribution is missing reviewed source or metadata",
         )
     metadata = parse_metadata(metadata_values[0], path.name)
     require(metadata["Version"] == version, "Source metadata version mismatch")
@@ -846,24 +1170,40 @@ def prepare_release_evidence(
     )
     wheel = next(path for path in artifacts if path.suffix == ".whl")
     sdist = next(path for path in artifacts if path.name.endswith(".tar.gz"))
+    snapshots = {path.name: artifact_snapshot(path) for path in artifacts}
     dependencies = [
-        *validate_wheel(wheel, version, expected_dependencies, source_root),
+        *validate_wheel(
+            wheel,
+            version,
+            expected_dependencies,
+            source_root,
+            snapshot=snapshots[wheel.name],
+        ),
         *direct_wheel_dependencies,
     ]
-    validate_sdist(sdist, version, source_root)
+    validate_sdist(sdist, version, source_root, snapshot=snapshots[sdist.name])
+    require(
+        all(artifact_snapshot(path) == snapshots[path.name] for path in artifacts),
+        "Distribution changed after validation",
+    )
 
     records = [
         {
             "file": path.name,
-            "sha256": sha256(path),
-            "size": path.stat().st_size,
+            "sha256": hashlib.sha256(snapshots[path.name]).hexdigest(),
+            "size": len(snapshots[path.name]),
         }
         for path in artifacts
     ]
     output_directory.mkdir()
     sbom_path = output_directory / f"{PROJECT_NAME}-{version}.spdx.json"
     sbom_path.write_bytes(
-        build_spdx(version, release_date, sha256(wheel), dependencies)
+        build_spdx(
+            version,
+            release_date,
+            hashlib.sha256(snapshots[wheel.name]).hexdigest(),
+            dependencies,
+        )
     )
     sbom_record = {
         "file": sbom_path.name,
@@ -893,6 +1233,10 @@ def prepare_release_evidence(
         for record in sorted(manifest_records, key=lambda item: str(item["file"]))
     )
     (output_directory / "SHA256SUMS.txt").write_text(manifest, encoding="utf-8")
+    require(
+        all(artifact_snapshot(path) == snapshots[path.name] for path in artifacts),
+        "Distribution changed during evidence generation",
+    )
     return evidence
 
 

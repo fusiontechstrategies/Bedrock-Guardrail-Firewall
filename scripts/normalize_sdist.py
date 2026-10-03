@@ -131,7 +131,7 @@ def normalize_sdist(path: Path, source_date_epoch: int) -> str:
         ):
             for original, value in sorted(members, key=lambda item: item[0].name):
                 normalized = tarfile.TarInfo(original.name.rstrip("/"))
-                normalized.mtime = source_date_epoch
+                normalized.mtime = 0
                 normalized.uid = 0
                 normalized.gid = 0
                 normalized.uname = ""
