@@ -157,7 +157,7 @@ def run() -> dict[str, Any]:
         tempfile.TemporaryDirectory(prefix="guardrail-sanitized-demo-") as data_dir,
         network_guard,
     ):
-        config = _fixed_config(runtime, Path(data_dir))
+        config = _fixed_config(runtime, Path(data_dir) / "private-state")
         config.validate()
         system = runtime.BedrockGuardrailSystem(config, privacy_key=DEMO_PRIVACY_KEY)
         for case in cases:

@@ -1797,6 +1797,18 @@ class CommandLineTests(unittest.TestCase):
 
 
 class BuiltInSuiteTests(GuardrailTestCase):
+    def test_offline_producer_creates_new_private_leaf_and_cleans_parent(self):
+        with app._temporary_offline_system(self.make_system()) as system:
+            state = system.config.data_dir
+            parent = state.parent
+            self.assertEqual(state.name, "private-state")
+            self.assertTrue(parent.name.startswith("guardrail-self-test-"))
+            self.assertTrue(system.doctor()["ready"])
+            descriptor = app._open_private_key(state, create=False, directory=True)
+            os.close(descriptor)
+        self.assertFalse(state.exists())
+        self.assertFalse(parent.exists())
+
     def test_built_in_self_test_passes(self):
         result = app.run_self_test(self.make_system())
         self.assertTrue(result["success"])

@@ -5462,7 +5462,7 @@ def _temporary_offline_system(system: BedrockGuardrailSystem):
     temp_dir = Path(temporary_directory.name)
     config = replace(
         system.config,
-        data_dir=temp_dir,
+        data_dir=temp_dir / "private-state",
         profile_name="offline_test"
         if "offline_test" in system.bundle.profiles
         else system.profile.name,

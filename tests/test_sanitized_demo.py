@@ -23,6 +23,32 @@ DEMO_SPEC.loader.exec_module(demo)
 
 
 class SanitizedDemoTests(unittest.TestCase):
+    def test_actual_demo_uses_application_created_private_leaf(self):
+        runtime, runtime_loader = self.load_runtime_for_injection()
+        original_process = runtime.BedrockGuardrailSystem.process
+        observed = []
+
+        def verify_private_leaf(system, *args, **kwargs):
+            state = system.config.data_dir
+            self.assertEqual(state.name, "private-state")
+            self.assertTrue(state.parent.name.startswith("guardrail-sanitized-demo-"))
+            descriptor = runtime._open_private_key(state, create=False, directory=True)
+            os.close(descriptor)
+            observed.append(state)
+            return original_process(system, *args, **kwargs)
+
+        with (
+            runtime_loader,
+            patch.object(
+                runtime.BedrockGuardrailSystem, "process", new=verify_private_leaf
+            ),
+        ):
+            report = demo.run()
+        self.assertTrue(report["success"])
+        self.assertEqual(len(observed), 6)
+        self.assertFalse(observed[0].exists())
+        self.assertFalse(observed[0].parent.exists())
+
     @staticmethod
     def load_runtime_for_injection():
         runtime = demo._load_runtime()
