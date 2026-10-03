@@ -241,3 +241,42 @@ Text is normalized with NFKC and stripped of Unicode 17.0.0 default-ignorable ch
 Source archives classify executable/build members using Unicode-normalized, case-insensitive portable names, then require canonical spelling and exact reviewed bytes. CI additionally validates and installs the source archive on Windows with package downloads disabled. This proves source identity and package installation behavior; it does not assert operating-system network isolation of the build process.
 
 Unknown, malformed or incomplete automated-reasoning conclusions are service failures governed by the configured failure action. Satisfiable conclusions require human review. A positive valid conclusion must contain concrete translated claims and a true scenario, with no unresolved input or logic warning. Empty, control-only, symbol-only or whitespace-only proof statements and malformed supporting rule identifiers are rejected. Positive proof strings must contain a letter or number and remain within the AWS character limit; multilingual strings are not subjected to the user-content byte limit. This validates service response shape and does not independently solve the returned proof.
+
+## Bedrock application response contract
+
+The adapter bounds its already-deserialized Botocore response before semantic
+projection. Only ordinary JSON dictionaries, lists, strings, finite numbers,
+booleans and null are accepted. Custom Mapping callbacks, non-string keys,
+invalid Unicode and integers outside the 64-bit magnitude budget are refused.
+
+| Boundary | Maximum |
+| --- | ---: |
+| Compact JSON UTF-8 encoded response | 2 MiB |
+| Assessments / outputs | 32 / 64 |
+| Findings per policy collection / across all assessments | 256 / 1,024 |
+| Usage keys / keys per mapping | 64 / 128 |
+| Items per other list | 1,024 |
+| Total value nodes / keys | 16,384 / 8,192 |
+| Nesting below the root | 16 levels |
+| Characters / UTF-8 bytes per string | 262,144 / 1 MiB |
+| Characters per key | 256 |
+
+These limits also cover unused service metadata. Size accounting visits bounded
+trees without serializing a second response copy. Transformed text accumulates
+characters and UTF-8 bytes, including inserted newlines, before a final join.
+Both totals must fit the configured input or output limit. The pre-projection
+finding ceiling also bounds retained Detection objects to 1,024. Original
+per-finding order, risk accumulation and detector metrics are preserved,
+including custom floating-point weights and thresholds.
+
+Excess or malformed responses become the configured external failure action,
+with at least queue_for_review for a required integration. Existing documented
+policy and automated-reasoning shapes within these bounds remain supported.
+Unusually large otherwise valid responses now fail closed; custom SDK-client
+wrappers must return plain JSON trees.
+
+Botocore has already materialized the HTTP response before this contract runs.
+These application bounds do not establish a transport-level or whole-process
+memory guarantee. Operators enabling live evaluation still need appropriate
+worker memory and concurrency limits. No live endpoint behavior or caller
+ability to expand service responses was demonstrated by the source review.

@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -1216,6 +1217,34 @@ class PolicyProfile:
     risk_thresholds: dict[str, float]
 
 
+def _required_failure_action(
+    action: GuardrailAction, required: bool
+) -> GuardrailAction:
+    return _max_action(action, GuardrailAction.REVIEW) if required else action
+
+
+def _validate_required_failure_actions(
+    profile: PolicyProfile, *, runtime_presidio_required: bool = False
+) -> None:
+    for required, action, label in (
+        (
+            profile.aws_guardrail_required,
+            profile.external_failure_action,
+            "external_failure_action",
+        ),
+        (
+            profile.presidio_required or runtime_presidio_required,
+            profile.presidio_failure_action,
+            "presidio_failure_action",
+        ),
+    ):
+        if required and action in {GuardrailAction.ALLOW, GuardrailAction.SANITIZE}:
+            raise ConfigurationError(
+                f"profile.{profile.name}.{label} must be at least queue_for_review "
+                "when its integration is required"
+            )
+
+
 @dataclass(frozen=True)
 class PolicyBundle:
     schema_version: int
@@ -1767,6 +1796,7 @@ def load_policy_bundle(policy_path: Path, profiles_path: Path) -> PolicyBundle:
                 raw_profile["risk_thresholds"], f"profile.{name}.risk_thresholds"
             ),
         )
+        _validate_required_failure_actions(profiles[name])
 
     digest_payload = {"policy": policy, "profiles": profiles_document}
     digest = _sha256_bytes(_canonical_json(digest_payload))
@@ -2284,10 +2314,9 @@ MAX_PUBLIC_RESPONSE_BYTES = 1_048_576
 
 OPAQUE_TOKEN_LABEL = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
-    r"(?P<field>access_token|refresh_token)['\"]?\s*[:=]\s*['\"]?"
-    r"|(?P<authorization>authorization['\"]?\s*:\s*['\"]?)?"
-    r"bearer\s+)(?P<value>[^\s'\"&<>,;()\[\]{}]+)",
-    re.IGNORECASE | re.ASCII,
+    r"(?P<field>(?ai:access_token|refresh_token))['\"]?\s*[:=]\s*['\"]?"
+    r"|(?P<authorization>(?ai:authorization)['\"]?\s*:\s*['\"]?)?"
+    r"(?ai:bearer)\s+)(?P<value>[^\s'\"&<>,;()\[\]{}]+)",
 )
 OPAQUE_TOKEN_ALPHABET = re.compile(r"[A-Za-z0-9._~+/=-]+", re.ASCII)
 OPAQUE_TOKEN_PLACEHOLDERS = frozenset(
@@ -2822,7 +2851,9 @@ class PrivacyEngine:
                     detector="system",
                     category="required_presidio_disabled",
                     field=field_name,
-                    action=self.profile.presidio_failure_action,
+                    action=_required_failure_action(
+                        self.profile.presidio_failure_action, required
+                    ),
                     severity="high",
                     confidence=1.0,
                 )
@@ -2835,7 +2866,9 @@ class PrivacyEngine:
                         detector="system",
                         category="presidio_unavailable",
                         field=field_name,
-                        action=self.profile.presidio_failure_action,
+                        action=_required_failure_action(
+                            self.profile.presidio_failure_action, required
+                        ),
                         severity="high",
                         confidence=1.0,
                         details={"error_type": self.analyzer_error},
@@ -3162,6 +3195,161 @@ class AwsClientProvider:
             config=sdk_config,
         )
         return self._clients[service_name]
+
+
+@dataclass(frozen=True)
+class _BedrockResponseLimits:
+    encoded_bytes: int = 2_097_152
+    assessments: int = 32
+    outputs: int = 64
+    policy_findings: int = 256
+    total_findings: int = 1024
+    usage_keys: int = 64
+    mapping_keys: int = 128
+    collection_items: int = 1024
+    nodes: int = 16_384
+    total_keys: int = 8192
+    depth: int = 16
+    string_chars: int = 262_144
+    string_bytes: int = 1_048_576
+    key_chars: int = 256
+
+
+BEDROCK_RESPONSE_LIMITS = _BedrockResponseLimits()
+BEDROCK_POLICY_COLLECTIONS = {
+    "topicPolicy": frozenset({"topics"}),
+    "contentPolicy": frozenset({"filters"}),
+    "wordPolicy": frozenset({"customWords", "managedWordLists"}),
+    "sensitiveInformationPolicy": frozenset({"piiEntities", "regexes"}),
+    "contextualGroundingPolicy": frozenset({"filters"}),
+    "automatedReasoningPolicy": frozenset({"findings"}),
+}
+
+
+def _response_string_size(
+    value: str, maximum_chars: int, maximum_bytes: int
+) -> tuple[int, int]:
+    """Count raw UTF-8 and compact JSON UTF-8 bytes without an encoded copy."""
+    if len(value) > maximum_chars:
+        raise ExternalServiceError("AWS guardrail string budget exceeded")
+    raw_bytes = 0
+    encoded_bytes = 2
+    for character in value:
+        codepoint = ord(character)
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise ExternalServiceError("AWS guardrail returned invalid Unicode")
+        width = (
+            1
+            if codepoint < 0x80
+            else 2
+            if codepoint < 0x800
+            else 3
+            if codepoint < 0x10000
+            else 4
+        )
+        raw_bytes += width
+        encoded_bytes += (
+            2 if character in '"\\\b\f\n\r\t' else 6 if codepoint < 0x20 else width
+        )
+        if raw_bytes > maximum_bytes:
+            raise ExternalServiceError("AWS guardrail string byte budget exceeded")
+    return raw_bytes, encoded_bytes
+
+
+def _validate_response_budget(response: Mapping[str, Any]) -> None:
+    """Bound the already-materialized SDK object before semantic projection."""
+    limits = BEDROCK_RESPONSE_LIMITS
+    nodes = keys = encoded_bytes = 0
+
+    def reserve(size: int) -> None:
+        nonlocal encoded_bytes
+        encoded_bytes += size
+        if encoded_bytes > limits.encoded_bytes:
+            raise ExternalServiceError("AWS guardrail aggregate byte budget exceeded")
+
+    def string(value: str, *, key: bool = False) -> None:
+        _, encoded = _response_string_size(
+            value,
+            limits.key_chars if key else limits.string_chars,
+            limits.string_bytes,
+        )
+        reserve(encoded)
+
+    def visit(value: Any, depth: int) -> None:
+        nonlocal nodes, keys
+        nodes += 1
+        if nodes > limits.nodes or depth > limits.depth:
+            raise ExternalServiceError("AWS guardrail structural budget exceeded")
+        if type(value) is dict:
+            if len(value) > limits.mapping_keys:
+                raise ExternalServiceError("AWS guardrail mapping budget exceeded")
+            keys += len(value)
+            if keys > limits.total_keys:
+                raise ExternalServiceError("AWS guardrail key budget exceeded")
+            reserve(2 + max(len(value) - 1, 0))
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise ExternalServiceError("AWS guardrail returned invalid keys")
+                string(key, key=True)
+                reserve(1)
+                visit(item, depth + 1)
+        elif type(value) is list:
+            if len(value) > limits.collection_items:
+                raise ExternalServiceError("AWS guardrail collection budget exceeded")
+            reserve(2 + max(len(value) - 1, 0))
+            for item in value:
+                visit(item, depth + 1)
+        elif type(value) is str:
+            string(value)
+        elif value is None:
+            reserve(4)
+        elif type(value) is bool:
+            reserve(4 if value else 5)
+        elif type(value) is int:
+            if value.bit_length() > 64:
+                raise ExternalServiceError("AWS guardrail integer budget exceeded")
+            reserve(len(str(value)))
+        elif type(value) is float and math.isfinite(value):
+            reserve(len(json.dumps(value)))
+        else:
+            raise ExternalServiceError("AWS guardrail returned unsupported values")
+
+    # Botocore JSON responses are ordinary dict/list/scalar trees. Custom
+    # Mapping callbacks are outside this application response contract.
+    if type(response) is not dict:
+        raise ExternalServiceError("AWS guardrail returned an invalid response")
+    for name, maximum in (
+        ("assessments", limits.assessments),
+        ("outputs", limits.outputs),
+    ):
+        collection = response.get(name)
+        if type(collection) is not list or len(collection) > maximum:
+            raise ExternalServiceError("AWS guardrail collection budget exceeded")
+    usage = response.get("usage", {})
+    if type(usage) is not dict or len(usage) > limits.usage_keys:
+        raise ExternalServiceError("AWS guardrail usage budget exceeded")
+    visit(response, 0)
+
+    total_findings = 0
+    for assessment in response["assessments"]:
+        if type(assessment) is not dict:
+            raise ExternalServiceError("AWS guardrail returned invalid assessment")
+        for name, collections in BEDROCK_POLICY_COLLECTIONS.items():
+            policy = assessment.get(name, {})
+            if type(policy) is not dict:
+                raise ExternalServiceError("AWS guardrail returned invalid policy")
+            for collection_name in collections:
+                collection = policy.get(collection_name, [])
+                if (
+                    type(collection) is not list
+                    or len(collection) > limits.policy_findings
+                ):
+                    raise ExternalServiceError("AWS guardrail finding budget exceeded")
+                total_findings += len(collection)
+                if total_findings > limits.total_findings:
+                    raise ExternalServiceError(
+                        "AWS guardrail total finding budget exceeded"
+                    )
 
 
 class BedrockGuardrailAdapter:
@@ -3508,9 +3696,11 @@ class BedrockGuardrailAdapter:
         field_name: str,
         maximum_output_chars: int = 262_144,
     ) -> AwsGuardrailResult:
-        if not isinstance(response, Mapping):
-            raise ExternalServiceError("AWS guardrail returned an invalid response")
-        if response.get("action") not in {"NONE", "GUARDRAIL_INTERVENED"}:
+        _validate_response_budget(response)
+        if type(response.get("action")) is not str or response["action"] not in {
+            "NONE",
+            "GUARDRAIL_INTERVENED",
+        }:
             raise ExternalServiceError("AWS guardrail returned an unknown action")
         for name in ("assessments", "outputs"):
             if not isinstance(response.get(name), list) or any(
@@ -3521,14 +3711,7 @@ class BedrockGuardrailAdapter:
                 )
         if not isinstance(response.get("usage", {}), Mapping):
             raise ExternalServiceError("AWS guardrail returned invalid usage")
-        policy_collections = {
-            "topicPolicy": {"topics"},
-            "contentPolicy": {"filters"},
-            "wordPolicy": {"customWords", "managedWordLists"},
-            "sensitiveInformationPolicy": {"piiEntities", "regexes"},
-            "contextualGroundingPolicy": {"filters"},
-            "automatedReasoningPolicy": {"findings"},
-        }
+        policy_collections = BEDROCK_POLICY_COLLECTIONS
         for assessment in response["assessments"]:
             if not assessment or set(assessment) - (
                 set(policy_collections)
@@ -3556,7 +3739,8 @@ class BedrockGuardrailAdapter:
                         if name == "automatedReasoningPolicy":
                             cls._validate_reasoning_finding(item)
                         if name != "automatedReasoningPolicy" and (
-                            item.get("action") not in {"NONE", "BLOCKED", "ANONYMIZED"}
+                            type(item.get("action")) is not str
+                            or item["action"] not in {"NONE", "BLOCKED", "ANONYMIZED"}
                             or (
                                 "detected" in item
                                 and not isinstance(item["detected"], bool)
@@ -3594,13 +3778,26 @@ class BedrockGuardrailAdapter:
                 )
             ):
                 raise ExternalServiceError("AWS guardrail omitted transformed content")
-            sanitized_text = "\n".join(
-                str(item.get("text", "")) for item in outputs if isinstance(item, dict)
-            )
-            if len(sanitized_text) > maximum_output_chars or "\x00" in sanitized_text:
-                raise ExternalServiceError(
-                    "AWS guardrail returned invalid transformed content"
+            parts: list[str] = []
+            characters = byte_count = 0
+            for item in outputs:
+                value = item["text"]
+                separator = 1 if parts else 0
+                characters += len(value) + separator
+                if characters > maximum_output_chars or "\x00" in value:
+                    raise ExternalServiceError(
+                        "AWS guardrail returned invalid transformed content"
+                    )
+                value_bytes, _ = _response_string_size(
+                    value, maximum_output_chars, maximum_output_chars
                 )
+                byte_count += value_bytes + separator
+                if byte_count > maximum_output_chars:
+                    raise ExternalServiceError(
+                        "AWS guardrail transformed byte budget exceeded"
+                    )
+                parts.append(value)
+            sanitized_text = "\n".join(parts)
         latency_values = [
             item.get("invocationMetrics", {}).get("guardrailProcessingLatency")
             for item in response.get("assessments", [])
@@ -3643,7 +3840,10 @@ class BedrockGuardrailAdapter:
                     detector="system",
                     category="required_aws_guardrail_disabled",
                     field=field_name,
-                    action=self.profile.external_failure_action,
+                    action=_required_failure_action(
+                        self.profile.external_failure_action,
+                        self.profile.aws_guardrail_required,
+                    ),
                     severity="critical",
                     confidence=1.0,
                 )
@@ -3665,7 +3865,10 @@ class BedrockGuardrailAdapter:
                     detector="system",
                     category="required_aws_guardrail_not_live",
                     field=field_name,
-                    action=self.profile.external_failure_action,
+                    action=_required_failure_action(
+                        self.profile.external_failure_action,
+                        self.profile.aws_guardrail_required,
+                    ),
                     severity="critical",
                     confidence=1.0,
                 )
@@ -3680,7 +3883,10 @@ class BedrockGuardrailAdapter:
                 detector="system",
                 category="aws_guardrail_configuration_missing",
                 field=field_name,
-                action=self.profile.external_failure_action,
+                action=_required_failure_action(
+                    self.profile.external_failure_action,
+                    self.profile.aws_guardrail_required,
+                ),
                 severity="critical",
                 confidence=1.0,
             )
@@ -3703,7 +3909,10 @@ class BedrockGuardrailAdapter:
                 detector="system",
                 category="aws_guardrail_call_failed",
                 field=field_name,
-                action=self.profile.external_failure_action,
+                action=_required_failure_action(
+                    self.profile.external_failure_action,
+                    self.profile.aws_guardrail_required,
+                ),
                 severity="critical",
                 confidence=1.0,
                 details={"error_type": _safe_error_type(exc)},
@@ -4700,6 +4909,10 @@ class BedrockGuardrailSystem:
                 f"Unknown trusted policy profile: {self.config.profile_name}"
             )
         self.profile = self.bundle.profiles[self.config.profile_name]
+        _validate_required_failure_actions(
+            self.profile,
+            runtime_presidio_required=self.config.presidio_mode == "required",
+        )
         if self.config.aws_mode == "live" and not live_aws_authorized:
             raise ConfigurationError(
                 "Live AWS mode was configured but not explicitly authorized"

@@ -8,6 +8,10 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 
 ### Security
 
+- Preserve Unicode separators and value whitespace for opaque-token labels while keeping label case matching and token alphabets explicitly ASCII.
+- Reject required integration profiles with release-permitting failure actions, validate runtime-required Presidio at startup, and enforce a minimum review on required failure paths.
+- Bound the materialized Bedrock response before projection by bytes, cardinality, strings, keys and nesting; accumulate transformed text within character and UTF-8 limits before joining while retaining original per-finding scoring order and metrics.
+
 - Apply ASCII format boundaries to credential, email, IBAN and CUI recognizers while retaining Unicode normalization and bounded matching.
 - Require literal JSON booleans for required grounding and profile controls.
 - Require reviewed source bytes in every wheel/source-distribution provenance validation call, including default API admission.

@@ -248,3 +248,24 @@ Unicode normalization, private-key handling and recognizer work limits remain
 in force.
 ASCII flags are scoped to the AWS secret label and token alphabet so that
 assignment separators retain the existing Unicode whitespace syntax.
+
+Opaque access_token, refresh_token and Bearer labels also scope ASCII case
+matching to their literal labels and scheme. Separators and value delimiters
+retain Unicode whitespace semantics after normalization. Values must still
+match the explicit ASCII opaque-token alphabet; placeholder and short bare
+Bearer prose exclusions are unchanged.
+
+## Required integration failure actions
+
+A profile with presidio_required=true must set presidio_failure_action to
+queue_for_review, escalate or block. A profile with
+aws_guardrail_required=true must use one of those same actions for
+external_failure_action. Required controls cannot use allow or sanitize as
+their failure action. Contradictory profiles are configuration errors before
+state or clients initialize, even when their digest is approved.
+
+Runtime presidio_mode=required applies the same semantic check to the selected
+profile, including profiles that otherwise make Presidio optional. Required
+failure branches also enforce a defensive minimum queue_for_review when called
+directly. Safe checked-in profiles and optional integration degradation keep
+their existing actions and digests.
