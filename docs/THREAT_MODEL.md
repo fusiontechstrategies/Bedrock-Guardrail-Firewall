@@ -207,6 +207,37 @@ CLI text and JSON inputs traverse path components with no-follow, descriptor-rel
 
 Audit recovery and verification use the same pinned owner-only audit namespace and nonblocking, no-follow leaf open as append. The descriptor must be a regular file with one link, the current owner, private POSIX permissions or the existing protected Windows owner-only DACL before any bytes are read. A missing event file is handled only after a descriptor open reports absence; FIFOs, links, unsafe owners/permissions and special files fail closed. Audit tail reads and verification lines remain bounded. Existing unsafe local state must be migrated by its trusted operator; verification does not relax permissions or repair ACLs.
 
+The same confidentiality requirement applies to behavior, metrics, review,
+incident and evidence-reservation state. Windows startup accepts an existing
+final data directory only with its protected exact current-owner DACL, including
+the directory's owner inheritance flags. Effective or inherit-only read grants
+to another principal, unsupported ACEs and unprotected final ACLs are refused.
+New state directories and temporary JSON files receive that private descriptor
+at creation, before content is written. Existing files are validated before
+private reads or atomic replacement. Generic JSON publication and cleanup keep
+the selected parent namespace pinned. Capacity accounting also validates
+existing evidence directories and files.
+
+Review and incident publication uses the same capacity lock as enumeration;
+reservation publication already occurs under that lock. This coordinates the
+POSIX no-replace hard-link transition with counting rather than accepting
+persistent multi-link state. Windows create-only publication uses no-replace
+rename in its pinned private parent. Metadata accounting permits ordinary leaf
+replacement while retaining the selected descriptor and validates one stat
+snapshot; a removed enumerated leaf is distinct from an unsafe ACL refusal.
+All state content reads and existing-leaf admission retain single-link checks.
+
+The mutation-focused traversal rule for ordinary ancestors is unchanged:
+trusted user/system ancestors need not have the final private state DACL.
+No existing ACL is repaired automatically. Operators reusing a Windows state
+directory that lacks the required private ACL must move or provision that state
+through their own approved administration process before running the service.
+Fresh runtime-created state remains supported. These records omit raw content,
+but stable pseudonyms, decisions and timing still warrant confidentiality.
+The original finding was a source trace without a supplied deployed ACL or
+platform proof; ordinary owned private-file checks do not establish any
+cross-user deployment behavior.
+
 These guarantees bind the namespace lookup and selected file object. They do not make writable regular input content immutable, exclude a compromised local owner/administrator, or establish portable kernel-enforced deadlines for a stalled filesystem. The host and local storage remain trusted as stated above.
 
 ## Out of scope

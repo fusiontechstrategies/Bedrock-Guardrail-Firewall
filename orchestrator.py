@@ -486,6 +486,7 @@ def _windows_relative_open(
     create: bool = False,
     descriptor: Any = None,
     writable: bool = False,
+    share_delete: bool = False,
 ) -> int:
     import ctypes
     import ctypes.wintypes as wintypes
@@ -552,7 +553,7 @@ def _windows_relative_open(
         ctypes.byref(io_status),
         None,
         0x10 if directory else 0x80,
-        3,
+        7 if share_delete else 3,
         2 if create else 1,
         0x00200020 | (1 if directory else 0x40),
         None,
@@ -681,10 +682,24 @@ def _open_json_read(path: Path) -> int:
                 kernel.CloseHandle(handle)
 
 
-def _load_json_file(path: Path, *, maximum_bytes: int = MAX_POLICY_BYTES) -> Any:
+def _load_json_file(
+    path: Path,
+    *,
+    maximum_bytes: int = MAX_POLICY_BYTES,
+    private_state: bool = False,
+) -> Any:
     try:
         _reject_path_links(path)
-        fd = _open_json_read(path)
+        if private_state:
+            with _auxiliary_namespace(path.parent) as parent_fd:
+                fd = _open_private_key(path, create=False, parent_fd=parent_fd)
+                try:
+                    _validate_auxiliary_descriptor(fd)
+                except BaseException:
+                    os.close(fd)
+                    raise
+        else:
+            fd = _open_json_read(path)
         with os.fdopen(fd, "rb") as handle:
             info = os.fstat(handle.fileno())
             if not stat.S_ISREG(info.st_mode) or (
@@ -799,7 +814,9 @@ def _auxiliary_namespace(parent: Path, *, trusted_parent: bool = False):
                 create=False,
                 directory=True,
                 parent_fd=root_fd,
-                trusted_parent=trusted_parent,
+                # Ancestor traversal remains mutation-focused. The final
+                # Windows state namespace must also protect confidentiality.
+                trusted_parent=trusted_parent and os.name != "nt",
             )
         info = os.fstat(parent_fd)
         if (
@@ -821,8 +838,7 @@ def _auxiliary_namespace(parent: Path, *, trusted_parent: bool = False):
         namespace.__exit__(None, None, None)
 
 
-def _validate_auxiliary_descriptor(fd: int) -> None:
-    info = os.fstat(fd)
+def _validate_auxiliary_info(info: os.stat_result) -> None:
     if (
         not stat.S_ISREG(info.st_mode)
         or info.st_nlink != 1
@@ -833,6 +849,10 @@ def _validate_auxiliary_descriptor(fd: int) -> None:
         or (os.name != "nt" and (info.st_uid != os.getuid() or info.st_mode & 0o077))
     ):
         raise StorageError("Auxiliary state must be a single owner-only regular file")
+
+
+def _validate_auxiliary_descriptor(fd: int) -> None:
+    _validate_auxiliary_info(os.fstat(fd))
 
 
 def _write_restricted(path: Path, data: bytes) -> None:
@@ -949,40 +969,73 @@ def _atomic_json_write(
     create_only: bool = False,
     compact: bool = False,
     maximum_bytes: int | None = None,
+    publication_lock: Path | None = None,
 ) -> None:
     encoded = _compact_state_json(value) + b"\n" if compact else None
     if maximum_bytes is not None and (encoded is None or len(encoded) > maximum_bytes):
         raise StorageError("Encoded state exceeds its write budget")
-    path.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
-        descriptor, raw_temp_path = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
-        )
-        temp_path = Path(raw_temp_path)
-        mode = "wb" if compact else "w"
-        options = {} if compact else {"encoding": "utf-8", "newline": "\n"}
-        with os.fdopen(descriptor, mode, **options) as handle:
-            if encoded is None:
-                json.dump(value, handle, ensure_ascii=True, indent=2, sort_keys=True)
-                handle.write("\n")
-            else:
-                handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        with contextlib.suppress(OSError):
-            temp_path.chmod(0o600)
-        if create_only:
-            os.link(temp_path, path)
-        else:
-            os.replace(temp_path, path)
-            temp_path = None
-    except OSError as exc:
+        with (
+            CrossProcessFileLock(publication_lock)
+            if publication_lock is not None
+            else contextlib.nullcontext(),
+            _auxiliary_namespace(path.parent) as parent_fd,
+        ):
+            try:
+                # Refuse existing non-private leaves instead of repairing their
+                # permissions by replacement. New temporaries are private before
+                # their first byte, including on Windows where chmod is not a DACL.
+                try:
+                    existing = _open_private_key(
+                        path, create=False, parent_fd=parent_fd
+                    )
+                except FileNotFoundError:
+                    pass
+                else:
+                    try:
+                        _validate_auxiliary_descriptor(existing)
+                    finally:
+                        os.close(existing)
+                    if create_only:
+                        raise FileExistsError(path.name)
+                temp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+                descriptor = _open_private_key(
+                    temp_path, create=True, parent_fd=parent_fd
+                )
+                mode = "wb" if compact else "w"
+                options = {} if compact else {"encoding": "utf-8", "newline": "\n"}
+                with os.fdopen(descriptor, mode, **options) as handle:
+                    _validate_auxiliary_descriptor(handle.fileno())
+                    if encoded is None:
+                        json.dump(
+                            value, handle, ensure_ascii=True, indent=2, sort_keys=True
+                        )
+                        handle.write("\n")
+                    else:
+                        handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if create_only:
+                    if os.name == "nt":
+                        # Windows rename refuses an existing destination and
+                        # avoids an intermediate pair of hard-link names.
+                        os.rename(temp_path, path)
+                        temp_path = None
+                    else:
+                        os.link(temp_path, path)
+                else:
+                    os.replace(temp_path, path)
+                    temp_path = None
+                if temp_path is not None:
+                    temp_path.unlink()
+                    temp_path = None
+            finally:
+                if temp_path is not None:
+                    with contextlib.suppress(OSError):
+                        temp_path.unlink()
+    except (OSError, ConfigurationError) as exc:
         raise StorageError(f"Unable to update {path.name}") from exc
-    finally:
-        if temp_path is not None:
-            with contextlib.suppress(OSError):
-                temp_path.unlink()
 
 
 @dataclass(frozen=True)
@@ -1910,6 +1963,15 @@ class EvaluationContext:
     subject_id: str = "anonymous"
 
 
+def _validate_private_windows_acl(
+    control: int, aces: Sequence[tuple[int, int, int, bool]], *, directory: bool
+) -> None:
+    """Require a protected exact owner grant, including inheritance metadata."""
+    expected = (0, 3 if directory else 0, 0x001F01FF, True)
+    if not control & 0x1000 or list(aces) != [expected]:
+        raise ConfigurationError("Local state ACL does not grant owner-only access")
+
+
 def _open_private_key(
     path: Path,
     *,
@@ -1919,6 +1981,7 @@ def _open_private_key(
     parent_fd: int | None = None,
     existing_handle: int | None = None,
     trusted_ancestor: bool = False,
+    share_delete: bool = False,
 ) -> int:
     if os.name != "nt":
         if directory:
@@ -2067,6 +2130,7 @@ def _open_private_key(
                 create=create,
                 descriptor=descriptor if create else None,
                 writable=True,
+                share_delete=share_delete,
             )
         else:
             if directory and create:
@@ -2082,7 +2146,7 @@ def _open_private_key(
             handle = kernel.CreateFileW(
                 str(path),
                 0xC0020000,
-                3,
+                7 if share_delete else 3,
                 ctypes.byref(attributes) if create and not directory else None,
                 1 if create and not directory else 3,
                 0x02200000 if directory else 0x00200000,
@@ -2179,15 +2243,22 @@ def _open_private_key(
                     raise ctypes.WinError(ctypes.get_last_error())
                 ace_bytes = ctypes.cast(ace, ctypes.POINTER(ctypes.c_ubyte))
                 mask = ctypes.c_uint32.from_address(ace.value + 4).value
-                if (
-                    ace_bytes[0] != 0
-                    or ace_bytes[1] != (3 if directory else 0)
-                    or mask != 0x001F01FF
-                    or not advapi.EqualSid(ctypes.c_void_p(ace.value + 8), owner_sid)
-                ):
-                    raise ConfigurationError(
-                        "Local state ACL does not grant owner-only access"
-                    )
+                _validate_private_windows_acl(
+                    control.value,
+                    [
+                        (
+                            ace_bytes[0],
+                            ace_bytes[1],
+                            mask,
+                            bool(
+                                advapi.EqualSid(
+                                    ctypes.c_void_p(ace.value + 8), owner_sid
+                                )
+                            ),
+                        )
+                    ],
+                    directory=directory,
+                )
         finally:
             kernel.LocalFree(loaded)
         if existing_handle is not None:
@@ -3946,7 +4017,9 @@ class BehaviorStore:
         if not self.path.exists():
             return {"schema_version": 1, "subjects": {}}
         try:
-            value = _load_json_file(self.path, maximum_bytes=MAX_BEHAVIOR_STATE_BYTES)
+            value = _load_json_file(
+                self.path, maximum_bytes=MAX_BEHAVIOR_STATE_BYTES, private_state=True
+            )
         except ConfigurationError as exc:
             raise StorageError("Behavior state is unreadable") from exc
         if not isinstance(value, dict) or not isinstance(
@@ -4087,7 +4160,9 @@ class MetricsStore:
         if not self.path.exists():
             return self._default()
         try:
-            value = _load_json_file(self.path, maximum_bytes=8_388_608)
+            value = _load_json_file(
+                self.path, maximum_bytes=8_388_608, private_state=True
+            )
         except ConfigurationError as exc:
             raise StorageError("Metrics state is unreadable") from exc
         if not isinstance(value, dict):
@@ -4140,9 +4215,8 @@ def _evidence_budget(data_dir: Path, added_bytes: int, added_files: int = 1):
     """Reserve evidence capacity without holding the quota lock during I/O."""
     lock = data_dir / "locks" / "evidence-budget.lock"
     reservations = data_dir / ".evidence-reservations"
-    reservations.mkdir(parents=True, exist_ok=True)
-    if reservations.is_symlink():
-        raise StorageError("Evidence reservation directory must not use links")
+    with _auxiliary_namespace(reservations):
+        pass
     reservation = reservations / f"{uuid.uuid4().hex}.json"
     with CrossProcessFileLock(lock):
         used_bytes = used_files = 0
@@ -4152,14 +4226,38 @@ def _evidence_budget(data_dir: Path, added_bytes: int, added_files: int = 1):
                 raise StorageError("Evidence directory must not be a symbolic link")
             if not directory.exists():
                 continue
-            with os.scandir(directory) as entries:
+            with (
+                _auxiliary_namespace(directory) as evidence_fd,
+                os.scandir(directory) as entries,
+            ):
                 for entry in entries:
-                    if not entry.is_file(follow_symlinks=False):
-                        raise StorageError("Unexpected entry in evidence directory")
+                    try:
+                        # Only accounting permits leaf deletion while retained:
+                        # an ordinary atomic writer may publish this temporary.
+                        # Parent handles and confidentiality checks stay strict.
+                        fd = _open_private_key(
+                            Path(entry.path),
+                            create=False,
+                            parent_fd=evidence_fd,
+                            share_delete=True,
+                        )
+                    except FileNotFoundError:
+                        continue  # This enumerated leaf is no longer present.
+                    try:
+                        info = os.fstat(fd)
+                        if info.st_nlink == 0:
+                            continue  # Removed leaf consumes no namespace quota.
+                        # One snapshot: replacement after this stat cannot turn
+                        # a validated live descriptor into a spurious refusal.
+                        _validate_auxiliary_info(info)
+                        used_bytes += info.st_size
+                    finally:
+                        os.close(fd)
                     used_files += 1
-                    used_bytes += entry.stat(follow_symlinks=False).st_size
                     if name == ".evidence-reservations":
-                        pending = _load_json_file(Path(entry.path), maximum_bytes=1024)
+                        pending = _load_json_file(
+                            Path(entry.path), maximum_bytes=1024, private_state=True
+                        )
                         if not isinstance(pending, dict) or any(
                             not isinstance(pending.get(key), int)
                             or isinstance(pending[key], bool)
@@ -4187,7 +4285,15 @@ def _evidence_budget(data_dir: Path, added_bytes: int, added_files: int = 1):
         yield
     finally:
         try:
-            with CrossProcessFileLock(lock):
+            with (
+                CrossProcessFileLock(lock),
+                _auxiliary_namespace(reservations) as parent_fd,
+            ):
+                fd = _open_private_key(reservation, create=False, parent_fd=parent_fd)
+                try:
+                    _validate_auxiliary_descriptor(fd)
+                finally:
+                    os.close(fd)
                 reservation.unlink()
         except OSError as exc:
             raise StorageError("Unable to release evidence reservation") from exc
@@ -4545,7 +4651,9 @@ class AuditStore:
                         checked += 1
             except FileNotFoundError:
                 try:
-                    empty_head = _load_json_file(self.chain_path, maximum_bytes=65_536)
+                    empty_head = _load_json_file(
+                        self.chain_path, maximum_bytes=65_536, private_state=True
+                    )
                 except ConfigurationError as head_error:
                     if not isinstance(head_error.__cause__, FileNotFoundError):
                         return {
@@ -4579,7 +4687,9 @@ class AuditStore:
                     "error_type": _safe_error_type(exc),
                 }
             try:
-                chain = _load_json_file(self.chain_path, maximum_bytes=65_536)
+                chain = _load_json_file(
+                    self.chain_path, maximum_bytes=65_536, private_state=True
+                )
             except ConfigurationError as exc:
                 if checked == 0 and isinstance(exc.__cause__, FileNotFoundError):
                     return checkpoint_result()
@@ -4619,7 +4729,8 @@ class ReviewStore:
         return "l1"
 
     def create(self, payload: Mapping[str, Any], level: str) -> dict[str, Any]:
-        self.local_dir.mkdir(parents=True, exist_ok=True)
+        with _auxiliary_namespace(self.local_dir):
+            pass
         file_id = uuid.uuid4().hex
         local_path = self.local_dir / f"review_{file_id}.json"
         with _evidence_budget(
@@ -4631,7 +4742,14 @@ class ReviewStore:
                 ).encode("utf-8")
             ),
         ):
-            _atomic_json_write(local_path, payload, create_only=True)
+            _atomic_json_write(
+                local_path,
+                payload,
+                create_only=True,
+                publication_lock=self.config.data_dir
+                / "locks"
+                / "evidence-budget.lock",
+            )
         queue_url = {
             "l1": self.config.review_queue_l1,
             "l2": self.config.review_queue_l2,
@@ -4674,7 +4792,8 @@ class IncidentStore:
         self.local_dir = data_dir / "incidents"
 
     def create(self, payload: Mapping[str, Any]) -> str:
-        self.local_dir.mkdir(parents=True, exist_ok=True)
+        with _auxiliary_namespace(self.local_dir):
+            pass
         file_id = uuid.uuid4().hex
         path = self.local_dir / f"incident_{file_id}.json"
         with _evidence_budget(
@@ -4686,7 +4805,14 @@ class IncidentStore:
                 ).encode("utf-8")
             ),
         ):
-            _atomic_json_write(path, payload, create_only=True)
+            _atomic_json_write(
+                path,
+                payload,
+                create_only=True,
+                publication_lock=self.local_dir.parent
+                / "locks"
+                / "evidence-budget.lock",
+            )
         return str(path)
 
 
