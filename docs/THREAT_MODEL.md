@@ -201,6 +201,14 @@ Residual risk: the calling application must actually enforce the returned action
 - Authorizer context, including classification and identity, is produced by an authenticated and authorized component.
 - Operators protect environment variables and the data directory.
 
+### Local read namespaces
+
+CLI text and JSON inputs traverse path components with no-follow, descriptor-relative opens on POSIX, or retained native directory handles and relative `NtCreateFile` opens on Windows. A link check is preliminary only; file reads use the selected descriptor and validate a regular, non-reparse leaf before bounded reads. A parent replacement before traversal is refused, and a replacement after a parent is pinned cannot redirect the leaf read. Direct text and bounded stdin input remain available.
+
+Audit recovery and verification use the same pinned owner-only audit namespace and nonblocking, no-follow leaf open as append. The descriptor must be a regular file with one link, the current owner, private POSIX permissions or the existing protected Windows owner-only DACL before any bytes are read. A missing event file is handled only after a descriptor open reports absence; FIFOs, links, unsafe owners/permissions and special files fail closed. Audit tail reads and verification lines remain bounded. Existing unsafe local state must be migrated by its trusted operator; verification does not relax permissions or repair ACLs.
+
+These guarantees bind the namespace lookup and selected file object. They do not make writable regular input content immutable, exclude a compromised local owner/administrator, or establish portable kernel-enforced deadlines for a stalled filesystem. The host and local storage remain trusted as stated above.
+
 ## Out of scope
 
 - Foundation-model inference quality

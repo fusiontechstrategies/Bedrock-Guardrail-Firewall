@@ -3888,15 +3888,36 @@ class AuditStore:
         self.chain_path = self.audit_dir / "chain.json"
         self.lock_path = config.data_dir / "locks" / "audit.lock"
 
-    def _last_event_hash(self) -> str | None:
-        if not self.events_path.exists():
-            return None
+    @contextlib.contextmanager
+    def _read_events(self, parent_fd: int | None = None):
+        """Validate a nonblocking, relative, no-follow descriptor before any read."""
+        namespace = (
+            _auxiliary_namespace(self.audit_dir)
+            if parent_fd is None
+            else contextlib.nullcontext(parent_fd)
+        )
+        with namespace as pinned_parent:
+            fd = _open_private_key(
+                self.events_path, create=False, parent_fd=pinned_parent
+            )
+            try:
+                _validate_auxiliary_descriptor(fd)
+            except BaseException:
+                os.close(fd)
+                raise
+            with os.fdopen(fd, "rb") as handle:
+                yield handle
+
+    def _last_event_hash(self, parent_fd: int | None = None) -> str | None:
         try:
-            with self.events_path.open("rb") as handle:
+            with self._read_events(parent_fd) as handle:
                 handle.seek(0, os.SEEK_END)
                 size = handle.tell()
                 handle.seek(max(0, size - MAX_AUDIT_LINE_BYTES - 2))
-                tail = handle.read().decode("utf-8")
+                tail_bytes = handle.read(MAX_AUDIT_LINE_BYTES + 3)
+                if len(tail_bytes) > MAX_AUDIT_LINE_BYTES + 2:
+                    raise StorageError("Audit tail exceeded its bounded read")
+                tail = tail_bytes.decode("utf-8")
             lines = [line for line in tail.splitlines() if line.strip()]
             if not lines:
                 return None
@@ -3920,7 +3941,15 @@ class AuditStore:
             ) and not (self._verify_signature(record, record_hash)):
                 raise StorageError("The audit tail signature is not authentic")
             return record_hash
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except FileNotFoundError:
+            return None
+        except (
+            OSError,
+            ConfigurationError,
+            StorageError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ) as exc:
             raise StorageError("Unable to recover the audit chain head") from exc
 
     def _kms_signature(self, digest: str) -> tuple[str | None, str | None]:
@@ -3990,18 +4019,12 @@ class AuditStore:
             return None, _safe_error_type(exc)
 
     def write(self, event: Mapping[str, Any]) -> dict[str, Any]:
-        self.audit_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        _reject_path_links(self.audit_dir)
-        if os.name != "nt":
-            info = self.audit_dir.stat()
-            if info.st_uid != os.getuid():
-                raise StorageError("Audit directory owner is unsafe")
-            self.audit_dir.chmod(0o700)
         with (
+            _auxiliary_namespace(self.audit_dir) as parent_fd,
             _evidence_budget(self.config.data_dir, MAX_AUDIT_LINE_BYTES, 2),
             CrossProcessFileLock(self.lock_path, timeout=300),
         ):
-            previous_hash = self._last_event_hash()
+            previous_hash = self._last_event_hash(parent_fd)
             core = dict(event)
             core["previous_hash"] = previous_hash
             digest = _sha256_bytes(_canonical_json(core))
@@ -4045,17 +4068,15 @@ class AuditStore:
                 raise StorageError("Audit record exceeds the maximum safe size")
             try:
                 try:
-                    fd = _open_private_key(self.events_path, create=True)
+                    fd = _open_private_key(
+                        self.events_path, create=True, parent_fd=parent_fd
+                    )
                 except FileExistsError:
-                    fd = _open_private_key(self.events_path, create=False)
+                    fd = _open_private_key(
+                        self.events_path, create=False, parent_fd=parent_fd
+                    )
                 with os.fdopen(fd, "r+b") as handle:
-                    info = os.fstat(handle.fileno())
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                        raise StorageError("Audit log must be one regular file")
-                    if os.name != "nt" and (
-                        info.st_uid != os.getuid() or info.st_mode & 0o077
-                    ):
-                        raise StorageError("Audit log permissions are unsafe")
+                    _validate_auxiliary_descriptor(handle.fileno())
                     handle.seek(0, os.SEEK_END)
                     handle.write(encoded)
                     handle.flush()
@@ -4125,26 +4146,11 @@ class AuditStore:
             )
         ):
             raise InputValidationError("Invalid trusted audit checkpoint")
-        if not self.events_path.exists():
-            if self.chain_path.exists():
-                return {
-                    "ok": False,
-                    "checked": 0,
-                    "error": "audit_events_missing",
-                }
-            return {
-                "ok": checkpoint_supplied and expected_count == 0,
-                "integrity_ok": True,
-                "checked": 0,
-                "error": None
-                if checkpoint_supplied and expected_count == 0
-                else "trusted_checkpoint_required",
-            }
         previous_hash: str | None = None
         checked = 0
         with CrossProcessFileLock(self.lock_path):
             try:
-                with self.events_path.open("rb") as handle:
+                with self._read_events() as handle:
                     for line_number, raw_line in enumerate(
                         iter(lambda: handle.readline(MAX_AUDIT_LINE_BYTES + 1), b""),
                         start=1,
@@ -4198,26 +4204,52 @@ class AuditStore:
                             }
                         previous_hash = supplied_hash
                         checked += 1
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            except FileNotFoundError:
+                try:
+                    _load_json_file(self.chain_path, maximum_bytes=65_536)
+                except ConfigurationError as head_error:
+                    if not isinstance(head_error.__cause__, FileNotFoundError):
+                        return {
+                            "ok": False,
+                            "checked": 0,
+                            "error": "audit_chain_head_unreadable",
+                        }
+                else:
+                    return {
+                        "ok": False,
+                        "checked": 0,
+                        "error": "audit_events_missing",
+                    }
+                return {
+                    "ok": checkpoint_supplied and expected_count == 0,
+                    "integrity_ok": True,
+                    "checked": 0,
+                    "error": None
+                    if checkpoint_supplied and expected_count == 0
+                    else "trusted_checkpoint_required",
+                }
+            except (
+                OSError,
+                ConfigurationError,
+                StorageError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as exc:
                 return {
                     "ok": False,
                     "checked": checked,
                     "error": "audit_read_failure",
                     "error_type": _safe_error_type(exc),
                 }
-        if not self.chain_path.exists():
-            return {
-                "ok": False,
-                "checked": checked,
-                "error": "audit_chain_head_missing",
-            }
         try:
             chain = _load_json_file(self.chain_path, maximum_bytes=65_536)
         except ConfigurationError as exc:
             return {
                 "ok": False,
                 "checked": checked,
-                "error": "audit_chain_head_unreadable",
+                "error": "audit_chain_head_missing"
+                if isinstance(exc.__cause__, FileNotFoundError)
+                else "audit_chain_head_unreadable",
                 "error_type": _safe_error_type(exc),
             }
         if not isinstance(chain, dict) or chain.get("last_hash") != previous_hash:
@@ -5791,17 +5823,14 @@ def _read_cli_text(path: str | None, direct: str | None, field_name: str) -> str
         if path == "-":
             value = _bounded_stdin_bytes()
         else:
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_NONBLOCK", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_BINARY", 0)
-            )
             _reject_path_links(Path(path))
-            fd = os.open(path, flags)
+            fd = _open_json_read(Path(path))
             with os.fdopen(fd, "rb") as handle:
                 info = os.fstat(handle.fileno())
-                if not stat.S_ISREG(info.st_mode):
+                if not stat.S_ISREG(info.st_mode) or (
+                    getattr(info, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                ):
                     raise InputValidationError(f"{field_name} file must be regular")
                 value = handle.read(MAX_CLI_INPUT_BYTES + 1)
         if len(value) > MAX_CLI_INPUT_BYTES:
@@ -5810,7 +5839,9 @@ def _read_cli_text(path: str | None, direct: str | None, field_name: str) -> str
     except UnicodeDecodeError as exc:
         raise InputValidationError(f"{field_name} file must be UTF-8") from exc
     except OSError as exc:
-        raise InputValidationError(f"Unable to read {field_name} input") from exc
+        raise InputValidationError(
+            f"Unable to read {field_name} input as a regular file"
+        ) from exc
 
 
 def _parse_context_argument(raw: str | None, path: str | None) -> dict[str, Any]:

@@ -1,0 +1,226 @@
+name: Promote verified release candidate
+
+on:
+  workflow_run:
+    workflows: ["Release candidate"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-promotion-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'repository_dispatch' && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      artifact-id: ${{ steps.identity.outputs.artifact-id }}
+      source-tag: ${{ steps.selection.outputs.source-tag }}
+      verifier-commit: ${{ steps.identity.outputs.verifier-commit }}
+      source-commit: ${{ steps.selection.outputs.source-commit }}
+      version: ${{ steps.subjects.outputs.version }}
+      tag: ${{ steps.subjects.outputs.tag }}
+      manifest: ${{ steps.subjects.outputs.manifest }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_RUN: ${{ github.event.workflow_run.id }}
+      PRODUCER_COMMIT: ${{ github.event.workflow_run.head_sha }}
+      VERIFIER_COMMIT: ${{ github.workflow_sha }}
+    steps:
+      - name: Check out default-branch workflow verification code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: verifier
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Install isolated trusted verification parsers
+        run: |
+          python -I -m venv "$RUNNER_TEMP/release-verifier"
+          "$RUNNER_TEMP/release-verifier/bin/python" -I -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r verifier/requirements-verifier.lock
+      - name: Bind authenticated run, source and independent verifier
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$PRODUCER_COMMIT" =~ ^[0-9a-f]{40}$ && "$VERIFIER_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(gh api "repos/$GH_REPO" --jq .default_branch)" = main
+          test "$(gh api "repos/$GH_REPO/branches/main" --jq .protected)" = true
+          test "$(gh api "repos/$GH_REPO/commits/$VERIFIER_COMMIT" --jq .commit.verification.verified)" = true
+          test "$(gh api "repos/$GH_REPO/commits/$PRODUCER_COMMIT" --jq .commit.verification.verified)" = true
+          git -C verifier merge-base --is-ancestor "$PRODUCER_COMMIT" origin/main
+          git -C verifier merge-base --is-ancestor "$VERIFIER_COMMIT" origin/main
+          gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN" > source-run.json
+          gh api --paginate --slurp "repos/$GH_REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100" > source-artifacts.json
+          "$RUNNER_TEMP/release-verifier/bin/python" -I verifier/scripts/verify_release_handoff.py identity source-run.json source-artifacts.json "$SOURCE_RUN" "$PRODUCER_COMMIT" "$GH_REPO" > source-identity.json
+          python -I - <<'PY'
+          import json, os
+          identity = json.load(open('source-identity.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              print('artifact-id=' + str(identity['artifact-id']), file=out)
+              print('verifier-commit=' + os.environ['VERIFIER_COMMIT'], file=out)
+          PY
+      - name: Download only the authenticated run's immutable candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ steps.identity.outputs.artifact-id }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          merge-multiple: true
+          path: release-assets
+      - name: Authenticate candidate selection against immutable tag and protected main
+        id: selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-verifier/bin/python" -I verifier/scripts/verify_release_handoff.py selection release-assets > candidate-selection.json
+          SOURCE_COMMIT="$(python -I -c 'import json; print(json.load(open("candidate-selection.json"))["source-commit"])')"
+          SOURCE_TAG="$(python -I -c 'import json; print(json.load(open("candidate-selection.json"))["source-tag"])')"
+          test "$(gh api "repos/$GH_REPO/commits/$SOURCE_COMMIT" --jq .commit.verification.verified)" = true
+          git -C verifier merge-base --is-ancestor "$SOURCE_COMMIT" origin/main
+          python -I verifier/scripts/verify_release_integrity.py tag "$GH_REPO" "$SOURCE_TAG" "$SOURCE_COMMIT"
+          echo "source-commit=$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "source-tag=$SOURCE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Check out authenticated source strictly as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ steps.selection.outputs.source-commit }}
+          path: source-data
+          persist-credentials: false
+      - name: Derive exact verified subjects without executing tagged code
+        id: subjects
+        env:
+          SOURCE_TAG: ${{ steps.selection.outputs.source-tag }}
+          SOURCE_COMMIT: ${{ steps.selection.outputs.source-commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-verifier/bin/python" -I verifier/scripts/verify_release_handoff.py release-assets source-data "$SOURCE_COMMIT" --expected-tag "$SOURCE_TAG" > subjects.json
+          python -I - <<'PY'
+          import json, os
+          subjects = json.load(open('subjects.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              for name in ('tag', 'version'):
+                  print(name + '=' + subjects[name], file=out)
+              print('manifest=' + json.dumps(subjects['manifest'], sort_keys=True, separators=(',', ':')), file=out)
+          PY
+          tag="$(python -I -c 'import json; print(json.load(open("subjects.json"))["tag"])')"
+          "$RUNNER_TEMP/release-verifier/bin/python" -I verifier/scripts/verify_release_integrity.py tag "$GH_REPO" "$tag" "$SOURCE_COMMIT"
+
+  attest:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out independently trusted verification code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.verify.outputs.verifier-commit }}
+          path: verifier
+          persist-credentials: false
+      - name: Check out authenticated tagged source as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.verify.outputs.source-commit }}
+          path: source-data
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Install isolated trusted verification parsers
+        run: |
+          python -I -m venv "$RUNNER_TEMP/release-verifier"
+          "$RUNNER_TEMP/release-verifier/bin/python" -I -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r verifier/requirements-verifier.lock
+      - name: Download the bound immutable producer artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.verify.outputs.artifact-id }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          merge-multiple: true
+          path: release-assets
+      - name: Reconstruct and verify exact subjects with protected code
+        env:
+          SOURCE_COMMIT: ${{ needs.verify.outputs.source-commit }}
+          EXPECTED_MANIFEST: ${{ needs.verify.outputs.manifest }}
+          SOURCE_TAG: ${{ needs.verify.outputs.source-tag }}
+        run: >-
+          "$RUNNER_TEMP/release-verifier/bin/python" -I verifier/scripts/verify_release_handoff.py release-assets source-data "$SOURCE_COMMIT" --expected-manifest "$EXPECTED_MANIFEST" --expected-tag "$SOURCE_TAG"
+      - name: Attest only the independently reconstructed subjects
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-path: release-assets/*
+
+  draft:
+    needs: [verify, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Check out independently trusted verification code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.verify.outputs.verifier-commit }}
+          path: verifier
+          persist-credentials: false
+      - name: Check out authenticated tagged source as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.verify.outputs.source-commit }}
+          path: source-data
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Install isolated trusted verification parsers
+        run: |
+          python -I -m venv "$RUNNER_TEMP/release-verifier"
+          "$RUNNER_TEMP/release-verifier/bin/python" -I -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r verifier/requirements-verifier.lock
+      - name: Download the bound immutable producer artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.verify.outputs.artifact-id }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          merge-multiple: true
+          path: release-assets
+      - name: Reconstruct and verify exact subjects with protected code
+        env:
+          SOURCE_COMMIT: ${{ needs.verify.outputs.source-commit }}
+          EXPECTED_MANIFEST: ${{ needs.verify.outputs.manifest }}
+          SOURCE_TAG: ${{ needs.verify.outputs.source-tag }}
+        run: >-
+          "$RUNNER_TEMP/release-verifier/bin/python" -I verifier/scripts/verify_release_handoff.py release-assets source-data "$SOURCE_COMMIT" --expected-manifest "$EXPECTED_MANIFEST" --expected-tag "$SOURCE_TAG"
+      - name: Create draft and verify every remote subject
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.verify.outputs.source-commit }}
+          EXPECTED_MANIFEST: ${{ needs.verify.outputs.manifest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-verifier/bin/python" -I verifier/scripts/create_verified_draft.py release-assets "source-data/CHANGELOG.md" "$GH_REPO" "$RELEASE_TAG" "$SOURCE_COMMIT" "$EXPECTED_MANIFEST"
