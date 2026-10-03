@@ -491,6 +491,7 @@ def validate_wheel(
     *,
     snapshot: bytes | None = None,
 ) -> list[dict[str, str]]:
+    require(source_root is not None, "Reviewed source is required for wheel provenance")
     snapshot = artifact_snapshot(path) if snapshot is None else snapshot
     try:
         limits.check_zip_structure(snapshot)
@@ -1015,6 +1016,7 @@ def validate_sdist(
     *,
     snapshot: bytes | None = None,
 ) -> None:
+    require(source_root is not None, "Reviewed source is required for sdist provenance")
     expected_root = f"{ARCHIVE_NAME}-{version}"
     expected = None
     generated = {}

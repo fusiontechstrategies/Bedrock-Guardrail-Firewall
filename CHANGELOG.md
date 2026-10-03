@@ -8,6 +8,13 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 
 ### Security
 
+- Apply ASCII format boundaries to credential, email, IBAN and CUI recognizers while retaining Unicode normalization and bounded matching.
+- Require literal JSON booleans for required grounding and profile controls.
+- Require reviewed source bytes in every wheel/source-distribution provenance validation call, including default API admission.
+- Keep audit events, chain head and trusted checkpoint comparison under one coherent writer lock.
+- Re-evaluate current local release permission before each live content-evaluation call after transformations.
+- Keep behavior-state reads and compact writes within the same 16 MiB encoded-byte limit, evicting oldest entries by both count and byte capacity.
+
 - Recognize compact JWT/JOSE credentials structurally, including signed headers with JSON whitespace, before input, output, or retrieval content reaches cloud evaluation. This detects sensitive content; it does not authenticate tokens. Oversized compact candidates fail closed before decoding.
 - Reject whitespace or case collisions in normalized policy identifiers before enforcement or digest acceptance. Existing valid policy digests remain unchanged.
 

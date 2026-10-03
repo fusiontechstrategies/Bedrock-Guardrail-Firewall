@@ -296,7 +296,7 @@ class ArchiveBudgetTests(unittest.TestCase):
                     self.assertRaises(release.ReleaseEvidenceError),
                 ):
                     release.validate_wheel(
-                        path, VERSION, [], snapshot=path.read_bytes()
+                        path, VERSION, [], Path(directory), snapshot=path.read_bytes()
                     )
 
     def test_declared_zip_count_multipart_zip64_and_trailing_bytes_refused(self):
@@ -310,10 +310,12 @@ class ArchiveBudgetTests(unittest.TestCase):
                 changed = bytearray(original)
                 struct.pack_into("<H", changed, offset + field, value)
                 with self.assertRaises(release.ReleaseEvidenceError):
-                    release.validate_wheel(path, VERSION, [], snapshot=bytes(changed))
+                    release.validate_wheel(
+                        path, VERSION, [], Path(directory), snapshot=bytes(changed)
+                    )
             with self.assertRaises(release.ReleaseEvidenceError):
                 release.validate_wheel(
-                    path, VERSION, [], snapshot=original + b"trailing"
+                    path, VERSION, [], Path(directory), snapshot=original + b"trailing"
                 )
 
 

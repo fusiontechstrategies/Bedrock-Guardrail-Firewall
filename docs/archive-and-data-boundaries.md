@@ -67,3 +67,37 @@ The separate no-bypass version-tag creation guard remains a release prerequisite
 new `v*` tags are blocked until a separately reviewed trusted creation mechanism
 is enabled. Main-only owner-review environments and immutable tag controls remain
 required. Administrators able to change those policies remain trusted authorities.
+
+## Provenance API admission
+
+The validate_wheel and validate_sdist APIs require an explicit reviewed source
+directory. An omitted source directory fails before opening the artifact.
+Structural archive checks alone do not constitute provenance. The privileged
+pipelines already pass authenticated source and retain the same artifact snapshots
+throughout validation. This API restriction does not add a publication path or
+change release approval.
+
+## Shared-state consistency and capacity
+
+Audit verification holds the same writer lock while reading the event stream,
+chain head and comparing an independently supplied trusted checkpoint. Without
+a trusted checkpoint, a coherent valid stream still reports
+trusted_checkpoint_required; it does not become an authenticated external proof.
+The canonical empty checkpoint is count zero with no last hash. Contradictory
+hash/count inputs are refused. Missing or explicit empty events with a missing
+or explicitly null head use the same checkpoint matcher; a nonempty or malformed
+head still refuses a missing stream. A zero checkpoint cannot match a nonempty
+valid stream.
+
+Behavior state uses the same 16 MiB encoded-byte limit for reads and writes.
+Writes use compact ASCII JSON with a final newline. Existing readable JSON remains
+supported. Age and configured subject-count pruning still apply; if encoded bytes
+exceed capacity, oldest subjects are removed deterministically before writing.
+Byte accounting includes escaped Unicode, keys, punctuation and envelope metadata.
+An oversized envelope or write is refused while preserving the prior file.
+
+Before each live Bedrock content evaluation, current local detections must permit
+external evaluation. Transformed input is rechecked locally before any output
+call. REVIEW, ESCALATE and BLOCK prevent that subsequent content call. Stub mode,
+explicit disabled mode and content-free audit/review telemetry retain their own
+existing behavior.
