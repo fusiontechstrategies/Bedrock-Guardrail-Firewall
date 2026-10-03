@@ -1,6 +1,6 @@
 # Release process
 
-Bedrock Guardrail Firewall releases must come from a reviewed, fully tested commit. Publishing a GitHub release is the explicit release authorization. The repository does not use a long-lived PyPI password or API token.
+Bedrock Guardrail Firewall releases must come from a reviewed, fully tested, signed commit on protected `main`. Owner approval of the protected `release` environment authorizes attestation and draft creation. Publishing the draft and a separate manual main-branch publish run, followed by `pypi` approval, authorize package publication. The repository does not use a long-lived PyPI password or API token.
 
 ## One-time trusted-publisher setup
 
@@ -8,7 +8,7 @@ Before the first PyPI release:
 
 1. Secure the PyPI maintainer account with two-factor authentication and store its recovery codes outside the repository.
 2. Register a pending PyPI trusted publisher for project `bedrock-guardrail-firewall`, GitHub owner `fusiontechstrategies`, repository `Bedrock-Guardrail-Firewall`, workflow `publish.yml`, and environment `pypi`.
-3. Create the GitHub `pypi` environment and require maintainer approval before deployment.
+3. Configure the GitHub `release` and `pypi` environments with required owner review and a custom deployment branch policy allowing only the branch `main`, with no tag policy. Preserve the existing `pypi` reviewer. Environment approval and tag creation are separate trusted maintainer actions.
 4. Do not create a repository PyPI token. Trusted publishing uses a short-lived, job-scoped OpenID Connect credential.
 
 The package name must be checked again immediately before setup and publication. An unavailable or disputed namespace is a release blocker.
@@ -23,18 +23,20 @@ The package name must be checked again immediately before setup and publication.
 6. Confirm the checked-out commit matches the release event, then run `scripts/prepare_release_evidence.py` with the proposed tag and exact 40-character commit ID. It rejects development versions, mismatched identities, unsafe archive members, unexpected distribution files, incomplete metadata, and an existing evidence directory.
 7. Inspect both archives, the SPDX 2.3 dependency SBOM, `release-evidence.json`, and `SHA256SUMS.txt` before approval.
 
-The `Release candidate` workflow can be started manually with the proposed tag to test its build, evidence, and provenance jobs. A manual run never creates or changes a GitHub release and never publishes to PyPI.
+The `Release candidate` entrypoint is `repository_dispatch` with event type `release-candidate` and data fields `release_tag` and `source_commit`. GitHub resolves that event's workflow from the default branch, never from the selected tag or a caller-selected workflow ref. Its resolver authenticates the immutable remote tag, signed source commit and protected-main ancestry before the isolated read-only build. It has no release-write, OIDC or attestation permission. A successful candidate starts default-main promotion verification, but attestation and draft creation still require `release` owner approval. Do not invoke the dispatch as part of security maintenance.
 
 ## Publish
 
 1. Merge only after branch protections and every required check pass.
-2. Create the immutable `vX.Y.Z` tag from the approved merge commit.
-3. Wait for the release-candidate workflow to build and attest the distributions and populate the draft GitHub release.
+2. Initial `v*` creation must be blocked by an active repository rule with no bypass while no trusted tag-creation mechanism exists. Security maintenance does not create tags or relax that gate. A future owner must separately review a default-main creation mechanism that binds the approved merge commit; ordinary unreviewed tag creation is unsupported. Existing immutable tags can be selected as data. Update/deletion immutability alone is insufficient to prevent arbitrary tag-selected YAML from obtaining GitHub credentials.
+3. When an approved immutable tag exists, explicitly request the default-main candidate with its exact tag and commit data. The `Promote verified release candidate` workflow authenticates the signed main producer run and unique immutable artifact ID, then independently authenticates candidate tag/source claims against the immutable remote tag and protected-main history. It checks out selected source strictly as data and reconstructs all five assets with the verifier pinned to the trusted workflow commit. Approve `release` only after this verification, then wait for attestation and verified draft creation.
 4. Confirm the draft contains exactly five assets: the wheel, source distribution, SPDX 2.3 dependency SBOM, `SHA256SUMS.txt`, and `release-evidence.json`. Review their provenance and contents along with the release notes.
 5. Publish the GitHub release only after explicit release approval.
-6. Approve the protected `pypi` environment after the publish workflow has downloaded and reverified the exact public release assets.
+6. Start `Publish package` manually on `main` with the approved tag, exact source commit and exact promotion workflow commit recorded in its provenance. The verify job checks signed protected-main ancestry, immutable tag binding, published non-prerelease status, exact assets and trusted-main signer provenance, then independently reconstructs the evidence. Approve `pypi` only after these checks.
 
-The candidate workflow creates GitHub build-provenance attestations and attaches the wheel, source distribution, SPDX 2.3 dependency SBOM, checksums, and evidence to a draft GitHub release. Existing draft assets are accepted only when their bytes match and different bytes are never overwritten. The workflow rejects extra draft assets. Publishing the reviewed draft starts a separate workflow that first requires the same exact five-asset set, recreates and compares the evidence, and then sends those exact downloaded distributions to PyPI through trusted publishing. An existing PyPI version is not skipped silently.
+The trusted promotion workflow attests the exact reconstructed five-file payload. Its attestation identifies the protected-main promotion workflow commit, rather than pretending the tagged producer is the trusted signer. Independently reconstructed evidence binds the distributions to the selected tag and source commit. Draft creation never replaces a prior release; failed verification cleans up only the immutable release ID returned by that invocation, and a cleanup failure requires owner review. Publication rechecks the attestation and final distribution hashes against the verified manifest before trusted publishing. An existing PyPI version is not skipped silently.
+
+The protected-main reviewer, environment approver and repository settings administrator remain trusted authorities. Source workflow permission declarations cannot globally cap the authority of arbitrary newly tagged YAML. The no-bypass initial `v*` creation guard, immutable update/deletion rules and main-only approval environments must remain active; removing a creation guard is a separate administrator policy change that invalidates this boundary. Administrator environment bypass authority remains available and trusted. The promotion path refuses source outside signed protected-main history. Selected source and candidate artifacts never supply the executing verifier, dependency lock or privileged Python import path. All verifier environment bootstrapping uses isolated Python module resolution. This maintenance change does not execute or approve a release.
 
 ## Post-publication verification
 

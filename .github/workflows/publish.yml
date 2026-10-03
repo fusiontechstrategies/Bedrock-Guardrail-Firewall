@@ -1,39 +1,56 @@
 name: Publish package
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Approved published stable tag
+        required: true
+        type: string
+      source_commit:
+        description: Exact signed protected-main commit for that tag
+        required: true
+        type: string
+      promotion_commit:
+        description: Exact trusted-main commit that verified and attested these bytes
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: publish-${{ github.event.release.tag_name }}
+  group: publish-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
   verify:
     name: Verify published release assets
-    if: github.event.release.prerelease == false
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      manifest: ${{ steps.manifest.outputs.value }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      RELEASE_COMMIT: ${{ github.sha }}
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_COMMIT: ${{ inputs.source_commit }}
+      PROMOTION_COMMIT: ${{ inputs.promotion_commit }}
+      VERIFIER_COMMIT: ${{ github.workflow_sha }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - name: Check out the tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ inputs.source_commit }}
 
       - name: Check out trusted verification tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
           path: trusted-verifier
 
       - name: Set up Python
@@ -45,14 +62,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m venv "$RUNNER_TEMP/release-verifier"
-          "$RUNNER_TEMP/release-verifier/bin/python" -m pip install \
+          python -I -m venv "$RUNNER_TEMP/release-verifier"
+          "$RUNNER_TEMP/release-verifier/bin/python" -I -m pip install \
             --disable-pip-version-check --only-binary=:all: --require-hashes \
             -r trusted-verifier/requirements-verifier.lock
 
-      - name: Verify the tagged source commit
+      - name: Bind protected-main source, verifier, published release and tag
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ && "$PROMOTION_COMMIT" =~ ^[0-9a-f]{40}$ && "$VERIFIER_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          test "$(gh api "repos/$GH_REPO" --jq .default_branch)" = main
+          test "$(gh api "repos/$GH_REPO/branches/main" --jq .protected)" = true
+          for commit in "$RELEASE_COMMIT" "$PROMOTION_COMMIT" "$VERIFIER_COMMIT"; do
+            test "$(gh api "repos/$GH_REPO/commits/$commit" --jq .commit.verification.verified)" = true
+            git -C trusted-verifier merge-base --is-ancestor "$commit" origin/main
+          done
+          "$RUNNER_TEMP/release-verifier/bin/python" -I trusted-verifier/scripts/verify_release_integrity.py tag "$GH_REPO" "$RELEASE_TAG" "$RELEASE_COMMIT"
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = false
+          test "$(gh release view "$RELEASE_TAG" --json isPrerelease --jq .isPrerelease)" = false
 
       - name: Verify the exact published asset set
         shell: bash
@@ -87,9 +117,10 @@ jobs:
           for asset in dist/*; do
             gh attestation verify "$asset" \
               --repo "$GH_REPO" \
-              --signer-workflow "$GH_REPO/.github/workflows/release-candidate.yml" \
-              --source-ref "refs/tags/$RELEASE_TAG" \
-              --source-digest "$RELEASE_COMMIT" \
+              --signer-workflow "$GH_REPO/.github/workflows/release-promotion.yml" \
+              --source-ref refs/heads/main \
+              --source-digest "$PROMOTION_COMMIT" \
+              --signer-digest "$PROMOTION_COMMIT" \
               --deny-self-hosted-runners
           done
           sha256sum dist/* > authenticated-distributions.sha256
@@ -116,11 +147,22 @@ jobs:
           for asset in dist/*; do
             gh attestation verify "$asset" \
               --repo "$GH_REPO" \
-              --signer-workflow "$GH_REPO/.github/workflows/release-candidate.yml" \
-              --source-ref "refs/tags/$RELEASE_TAG" \
-              --source-digest "$RELEASE_COMMIT" \
+              --signer-workflow "$GH_REPO/.github/workflows/release-promotion.yml" \
+              --source-ref refs/heads/main \
+              --source-digest "$PROMOTION_COMMIT" \
+              --signer-digest "$PROMOTION_COMMIT" \
               --deny-self-hosted-runners
           done
+
+      - name: Bind final publication bytes
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir final-assets
+          cp dist/* published-evidence/* final-assets/
+          value="$("$RUNNER_TEMP/release-verifier/bin/python" -I trusted-verifier/scripts/verify_release_integrity.py assets final-assets -)"
+          echo "value=$value" >> "$GITHUB_OUTPUT"
 
       - name: Store the reverified distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -144,9 +186,20 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      RELEASE_COMMIT: ${{ github.sha }}
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_COMMIT: ${{ inputs.source_commit }}
+      PROMOTION_COMMIT: ${{ inputs.promotion_commit }}
+      VERIFIER_COMMIT: ${{ github.workflow_sha }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
+      - name: Check out immutable trusted publication tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted-verifier
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
       - name: Download the reverified distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -164,11 +217,17 @@ jobs:
             fi
             gh attestation verify "$asset" \
               --repo "$GH_REPO" \
-              --signer-workflow "$GH_REPO/.github/workflows/release-candidate.yml" \
-              --source-ref "refs/tags/$RELEASE_TAG" \
-              --source-digest "$RELEASE_COMMIT" \
+              --signer-workflow "$GH_REPO/.github/workflows/release-promotion.yml" \
+              --source-ref refs/heads/main \
+              --source-digest "$PROMOTION_COMMIT" \
+              --signer-digest "$PROMOTION_COMMIT" \
               --deny-self-hosted-runners
           done
+
+      - name: Match final bytes to the trusted verification manifest
+        env:
+          EXPECTED_MANIFEST: ${{ needs.verify.outputs.manifest }}
+        run: python -I trusted-verifier/scripts/verify_release_integrity.py distributions dist "$EXPECTED_MANIFEST"
 
       - name: Publish with PyPI trusted publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
