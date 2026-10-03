@@ -5,8 +5,8 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import unittest
+from tests.private_state_fixture import PrivateTemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,7 +41,7 @@ def remove_link(path):
 
 class CliReadBoundaryTests(unittest.TestCase):
     def test_public_evaluate_parent_pin_preserves_original_file_or_refuses_swap(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory).resolve()
             requested, protected = root / "requested", root / "protected"
             requested.mkdir()
@@ -110,7 +110,7 @@ class CliReadBoundaryTests(unittest.TestCase):
         for option in ("--input-file", "--candidate-output-file"):
             with (
                 self.subTest(option=option),
-                tempfile.TemporaryDirectory() as directory,
+                PrivateTemporaryDirectory() as directory,
             ):
                 root = Path(directory).resolve()
                 requested, protected = root / "requested", root / "protected"
@@ -176,7 +176,7 @@ class CliReadBoundaryTests(unittest.TestCase):
                         remove_link(requested)
 
     def test_plain_unicode_files_and_direct_input_remain_supported(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             path = Path(directory).resolve() / "input.txt"
             path.write_text("A safe résumé.", encoding="utf-8")
             self.assertEqual(
@@ -186,7 +186,7 @@ class CliReadBoundaryTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "POSIX FIFO API")
     def test_fifo_input_refuses_before_blocking_read(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             path = Path(directory).resolve() / "input.txt"
             os.mkfifo(path, 0o600)
             with self.assertRaises(app.InputValidationError):
@@ -195,7 +195,7 @@ class CliReadBoundaryTests(unittest.TestCase):
 
 class AuditReadBoundaryTests(unittest.TestCase):
     def test_pinned_private_audit_descriptor_validates_before_any_read(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory).resolve()
             audit = root / "audit"
             parent_fd = app._open_private_key(audit, create=True, directory=True)
@@ -221,7 +221,7 @@ class AuditReadBoundaryTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "POSIX parent rename API")
     def test_audit_recovery_parent_swap_cannot_change_selected_tail(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory).resolve()
             system = app.BedrockGuardrailSystem(
                 fixtures.base_config(root), privacy_key=fixtures.TEST_KEY
@@ -261,7 +261,7 @@ class AuditReadBoundaryTests(unittest.TestCase):
         ):
             with (
                 self.subTest(command=command),
-                tempfile.TemporaryDirectory() as directory,
+                PrivateTemporaryDirectory() as directory,
             ):
                 root = Path(directory).resolve()
                 audit = root / "audit"
@@ -292,7 +292,7 @@ class AuditReadBoundaryTests(unittest.TestCase):
                     self.assertIn("local_audit_failed", result.stdout)
 
     def test_valid_recovery_and_trusted_checkpoint_verification(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             config = fixtures.base_config(Path(directory).resolve())
             system = app.BedrockGuardrailSystem(config, privacy_key=fixtures.TEST_KEY)
             result = system.process("A safe request.", {}, record=True)
@@ -303,7 +303,7 @@ class AuditReadBoundaryTests(unittest.TestCase):
             )
 
     def test_hardlinked_events_refuse_before_recovery_or_verification(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory).resolve()
             system = app.BedrockGuardrailSystem(
                 fixtures.base_config(root), privacy_key=fixtures.TEST_KEY

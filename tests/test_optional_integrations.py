@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 import unittest
+from tests.private_state_fixture import PrivateTemporaryDirectory
 from pathlib import Path
 
 
@@ -45,7 +45,7 @@ class Boto3ContractTests(unittest.TestCase):
 class PresidioIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.temporary = tempfile.TemporaryDirectory(prefix="guardrail-presidio-")
+        cls.temporary = PrivateTemporaryDirectory(prefix="guardrail-presidio-")
         config = app.RuntimeConfig(
             policy_path=PROJECT_ROOT / "guardrail_policy.json",
             profiles_path=PROJECT_ROOT / "guardrail_policy_profiles.json",

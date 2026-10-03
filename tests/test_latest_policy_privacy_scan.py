@@ -6,11 +6,11 @@ import hashlib
 import hmac
 import json
 import os
-import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
 import orchestrator as app
+from tests.private_state_fixture import PrivateTemporaryDirectory
 from tests.test_orchestrator import (
     FakeBedrockClient,
     GuardrailTestCase,
@@ -170,7 +170,7 @@ class LatestPrivacyScanTests(GuardrailTestCase):
 
 class LatestPolicyScanTests(GuardrailTestCase):
     def load_documents(self, policy, profiles):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             first, second = root / "policy.json", root / "profiles.json"
             first.write_text(json.dumps(policy), encoding="utf-8")

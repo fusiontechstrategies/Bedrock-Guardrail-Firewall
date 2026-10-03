@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import gzip
 import importlib.util
-import io
 import json
 import re
 import sys
-import tarfile
 import tempfile
-import zipfile
 from pathlib import Path
 
 MAX_ASSET_BYTES = 16 * 1024 * 1024
@@ -29,36 +25,15 @@ def load_trusted_helper(name):
 
 
 def preflight_archives(directory):
-    """Bound decoder output before the existing canonical archive verifier reads it."""
+    """Apply the same pre-parser budgets on the standalone and trusted routes."""
+    limits = load_trusted_helper("archive_limits")
     for path in directory.iterdir():
+        value = limits.regular_snapshot(path)
         if path.name.endswith(".whl"):
-            # Bound decoder expansion before the trusted wheel parser reads snapshots.
-            with zipfile.ZipFile(path) as archive:
-                members = archive.infolist()
-                if (
-                    len(members) > 10000
-                    or any(
-                        m.compress_type
-                        not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
-                        or m.file_size > MAX_ASSET_BYTES
-                        for m in members
-                    )
-                    or sum(m.file_size for m in members) > MAX_TOTAL_BYTES
-                ):
-                    raise ValueError("Wheel handoff exceeds archive budget")
+            limits.check_zip_structure(value)
         else:
-            with gzip.open(path, "rb") as stream:
-                decoded = stream.read(MAX_TOTAL_BYTES + 1)
-            if len(decoded) > MAX_TOTAL_BYTES:
-                raise ValueError("Source handoff exceeds decoded archive budget")
-            with tarfile.open(fileobj=io.BytesIO(decoded), mode="r:") as archive:
-                members = archive.getmembers()
-                if (
-                    len(members) > 10000
-                    or any(m.size < 0 or m.size > MAX_ASSET_BYTES for m in members)
-                    or sum(m.size for m in members) > MAX_TOTAL_BYTES
-                ):
-                    raise ValueError("Source handoff exceeds member budget")
+            with limits.bounded_tar_stream(value):
+                pass
 
 
 def verify_run_identity(run, artifact_pages, run_id, commit, repository):

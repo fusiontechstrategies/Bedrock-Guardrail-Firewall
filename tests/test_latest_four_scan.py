@@ -8,8 +8,8 @@ import io
 import json
 import os
 import tarfile
-import tempfile
 import unittest
+from tests.private_state_fixture import PrivateTemporaryDirectory
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -251,7 +251,7 @@ def change_wheel_metadata(wheel: Path, metadata: bytes) -> None:
     values[record_name] = rows.getvalue().encode()
     with zipfile.ZipFile(wheel, "w") as archive:
         for name, value in values.items():
-            archive.writestr(name, value)
+            archive.writestr(release_tests.canonical_wheel_info(name), value)
 
 
 class MarkerAndArchiveTests(unittest.TestCase):
@@ -279,7 +279,7 @@ class MarkerAndArchiveTests(unittest.TestCase):
             ('extra == "aws"', 'extra == "aws" and (extra == "aws" or extra != "aws")'),
         )
         for old, new in attacks:
-            with self.subTest(marker=new), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(marker=new), PrivateTemporaryDirectory() as directory:
                 root = Path(directory)
                 wheel = self.fixture(root)
                 change_wheel_metadata(
@@ -290,8 +290,8 @@ class MarkerAndArchiveTests(unittest.TestCase):
                         wheel, VERSION, release.parse_optional_dependencies(root), root
                     )
 
-    def test_canonical_marker_equivalents_are_accepted(self):
-        with tempfile.TemporaryDirectory() as directory:
+    def test_marker_equivalents_parse_but_source_divergent_bytes_are_refused(self):
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             wheel = self.fixture(root)
             metadata = METADATA.replace(b'extra == "aws"', b"((extra=='aws'))")
@@ -300,9 +300,15 @@ class MarkerAndArchiveTests(unittest.TestCase):
                 b'("presidio" == extra) and ("3.14" > python_version)',
             )
             change_wheel_metadata(wheel, metadata)
-            actual = release.validate_wheel(
-                wheel, VERSION, release.parse_optional_dependencies(root), root
+            actual = release.parse_wheel_dependencies(
+                release.parse_metadata(metadata, wheel.name)
             )
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "differs from reviewed source"
+            ):
+                release.validate_wheel(
+                    wheel, VERSION, release.parse_optional_dependencies(root), root
+                )
             self.assertEqual(len(actual), 4)
             self.assertIn(
                 'extra == "presidio" and python_version < "3.14"',
@@ -310,7 +316,7 @@ class MarkerAndArchiveTests(unittest.TestCase):
             )
 
     def test_source_metadata_and_parser_work_budgets_are_authenticated(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             self.fixture(root)
             path = root / "pyproject.toml"
@@ -349,7 +355,7 @@ class MarkerAndArchiveTests(unittest.TestCase):
             normalizer.validate_member_name(name)
 
     def test_real_archives_reject_aliases_before_verification_or_normalization(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             wheel = self.fixture(root)
             with zipfile.ZipFile(wheel, "a") as archive:
@@ -390,7 +396,7 @@ class MarkerAndArchiveTests(unittest.TestCase):
     def test_observed_windows_alias_is_refused_without_settings_changes(
         self,
     ):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             path = Path(directory) / "pyproject.toml"
             path.write_bytes(b"reviewed build configuration")
             kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -456,7 +462,7 @@ class LambdaDurableAuditTests(GuardrailTestCase):
         ):
             with (
                 self.subTest(overrides=overrides),
-                tempfile.TemporaryDirectory() as directory,
+                PrivateTemporaryDirectory() as directory,
             ):
                 with (
                     patch.dict(
@@ -502,7 +508,7 @@ class LambdaDurableAuditTests(GuardrailTestCase):
                 gate.assert_called_once_with()
                 constructor.assert_not_called()
                 self.assertIsNone(app._LAMBDA_SYSTEM)
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             for event in events:
                 with (
                     self.subTest(valid_profile_event=event),
@@ -520,7 +526,7 @@ class LambdaDurableAuditTests(GuardrailTestCase):
                     constructor.assert_not_called()
 
     def test_valid_cold_start_passes_required_profile_and_body_cannot_override_it(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             system = MagicMock()
             system.process.return_value = {"action": "allow"}
             with (

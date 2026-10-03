@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import orchestrator as app
+from tests.private_state_fixture import PrivateTemporaryDirectory
 
 from tests.test_orchestrator import FakeBedrockClient, GuardrailTestCase
 
@@ -160,7 +160,7 @@ class SecurityRegressionTests(GuardrailTestCase):
             self.assertRaisesRegex(app.InputValidationError, "too large"),
         ):
             app._read_cli_text("-", None, "input")
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             path = Path(directory) / "large.txt"
             path.write_bytes(b"a" * (app.MAX_CLI_INPUT_BYTES + 1))
             with self.assertRaisesRegex(app.InputValidationError, "too large"):
@@ -463,7 +463,7 @@ class SecurityRegressionTests(GuardrailTestCase):
 
         if os.name != "nt":
             self.skipTest("Windows junction contract")
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "target"
             target.mkdir()
@@ -584,7 +584,7 @@ class SecurityRegressionTests(GuardrailTestCase):
     def test_privacy_key_rejects_hard_links(self):
         import os
 
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             app.PrivacyKey(root)
             os.link(root / "privacy.key", root / "alias")
