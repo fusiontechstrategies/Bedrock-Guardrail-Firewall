@@ -342,6 +342,9 @@ def _resolve_path(
         path = _relative_runtime_base() / path
     if reject_links:
         _reject_path_links(path)
+        # A link check is diagnostic only. Preserve the caller's lexical
+        # namespace for subsequent component-relative, no-follow opening.
+        return Path(os.path.abspath(path))
     return path.resolve(strict=False)
 
 
@@ -742,7 +745,7 @@ def _duplicate_windows_directory(handle: int) -> int:
 
 
 @contextlib.contextmanager
-def _auxiliary_namespace(parent: Path):
+def _auxiliary_namespace(parent: Path, *, trusted_parent: bool = False):
     """Pin the trusted namespace while opening owner-only auxiliary files."""
     _reject_path_links(parent)
     namespace = (
@@ -774,6 +777,11 @@ def _auxiliary_namespace(parent: Path):
             or (
                 os.name != "nt"
                 and (root_info.st_uid != os.getuid() or root_info.st_mode & 0o022)
+                and not (
+                    trusted_parent
+                    and root_info.st_uid == 0
+                    and root_info.st_mode & stat.S_ISVTX
+                )
             )
         ):
             raise StorageError("Local state namespace owner or permissions are unsafe")
@@ -790,6 +798,7 @@ def _auxiliary_namespace(parent: Path):
                 create=False,
                 directory=True,
                 parent_fd=root_fd,
+                trusted_parent=trusted_parent,
             )
         info = os.fstat(parent_fd)
         if (
@@ -2130,24 +2139,34 @@ def _open_private_key(
 
 
 class PrivacyKey:
-    def __init__(self, data_dir: Path, injected_key: bytes | None = None):
+    def __init__(
+        self,
+        data_dir: Path,
+        injected_key: bytes | None = None,
+        *,
+        parent_fd: int | None = None,
+    ):
         self.path = data_dir / "privacy.key"
         self.source = "runtime_injected" if injected_key is not None else "local_file"
-        self.key = injected_key if injected_key is not None else self._load_or_create()
+        self.key = (
+            injected_key
+            if injected_key is not None
+            else self._load_or_create(parent_fd)
+        )
         if len(self.key) < 32:
             raise ConfigurationError("Privacy HMAC key must contain at least 32 bytes")
 
-    def _load_or_create(self) -> bytes:
+    def _load_or_create(self, parent_fd: int | None = None) -> bytes:
         _reject_path_links(self.path.parent)
         lock_path = self.path.parent / "locks" / "privacy-key.lock"
         with CrossProcessFileLock(lock_path):
             try:
                 created = False
                 try:
-                    fd = _open_private_key(self.path, create=True)
+                    fd = _open_private_key(self.path, create=True, parent_fd=parent_fd)
                     created = True
                 except FileExistsError:
-                    fd = _open_private_key(self.path, create=False)
+                    fd = _open_private_key(self.path, create=False, parent_fd=parent_fd)
                 with os.fdopen(fd, "r+b") as handle:
                     info = os.fstat(handle.fileno())
                     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -4586,32 +4605,44 @@ class BedrockGuardrailSystem:
                 "Live AWS mode was configured but not explicitly authorized"
             )
 
-        self.config.data_dir.mkdir(parents=True, exist_ok=True)
-        effective_privacy_key = (
-            privacy_key if privacy_key is not None else _privacy_key_from_env()
-        )
-        self.privacy_key = PrivacyKey(self.config.data_dir, effective_privacy_key)
-        self.provider = AwsClientProvider(
-            self.config, live_authorized=live_aws_authorized
-        )
-        if aws_clients:
-            self.provider._clients.update(aws_clients)
-        self.privacy = PrivacyEngine(self.config, self.bundle, self.profile)
-        self.local_policy = LocalPolicyEngine(self.bundle, self.profile)
-        self.authorization = AuthorizationEngine(self.bundle)
-        self.grounding_engine = GroundingEngine(self.bundle, self.profile)
-        self.aws_guardrail = BedrockGuardrailAdapter(
-            self.config,
-            self.profile,
-            self.provider,
-            injected_client=(aws_clients or {}).get("bedrock-runtime"),
-        )
-        self.behavior = BehaviorStore(self.config)
-        self.metrics = MetricsStore(self.config.data_dir)
-        self.audit = AuditStore(self.config, self.provider)
-        self.reviews = ReviewStore(self.config, self.provider)
-        self.incidents = IncidentStore(self.config.data_dir)
-        self.risk = RiskEngine(self.bundle, self.profile)
+        # Open/create only the configured final leaf beneath a trusted existing
+        # parent. Keep its original namespace pinned throughout initialization,
+        # including the injected-key route, and open key bytes relative to it.
+        try:
+            with _auxiliary_namespace(
+                self.config.data_dir, trusted_parent=True
+            ) as data_fd:
+                effective_privacy_key = (
+                    privacy_key if privacy_key is not None else _privacy_key_from_env()
+                )
+                self.privacy_key = PrivacyKey(
+                    self.config.data_dir, effective_privacy_key, parent_fd=data_fd
+                )
+                self.provider = AwsClientProvider(
+                    self.config, live_authorized=live_aws_authorized
+                )
+                if aws_clients:
+                    self.provider._clients.update(aws_clients)
+                self.privacy = PrivacyEngine(self.config, self.bundle, self.profile)
+                self.local_policy = LocalPolicyEngine(self.bundle, self.profile)
+                self.authorization = AuthorizationEngine(self.bundle)
+                self.grounding_engine = GroundingEngine(self.bundle, self.profile)
+                self.aws_guardrail = BedrockGuardrailAdapter(
+                    self.config,
+                    self.profile,
+                    self.provider,
+                    injected_client=(aws_clients or {}).get("bedrock-runtime"),
+                )
+                self.behavior = BehaviorStore(self.config)
+                self.metrics = MetricsStore(self.config.data_dir)
+                self.audit = AuditStore(self.config, self.provider)
+                self.reviews = ReviewStore(self.config, self.provider)
+                self.incidents = IncidentStore(self.config.data_dir)
+                self.risk = RiskEngine(self.bundle, self.profile)
+        except OSError as exc:
+            raise ConfigurationError(
+                "Unable to initialize the local data namespace safely"
+            ) from exc
 
     def _effective_limits(self) -> dict[str, int]:
         return {

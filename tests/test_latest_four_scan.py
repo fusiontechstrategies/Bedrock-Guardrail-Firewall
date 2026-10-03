@@ -251,7 +251,7 @@ def change_wheel_metadata(wheel: Path, metadata: bytes) -> None:
     values[record_name] = rows.getvalue().encode()
     with zipfile.ZipFile(wheel, "w") as archive:
         for name, value in values.items():
-            archive.writestr(name, value)
+            archive.writestr(release_tests.canonical_wheel_info(name), value)
 
 
 class MarkerAndArchiveTests(unittest.TestCase):
@@ -290,7 +290,7 @@ class MarkerAndArchiveTests(unittest.TestCase):
                         wheel, VERSION, release.parse_optional_dependencies(root), root
                     )
 
-    def test_canonical_marker_equivalents_are_accepted(self):
+    def test_marker_equivalents_parse_but_source_divergent_bytes_are_refused(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             wheel = self.fixture(root)
@@ -300,9 +300,15 @@ class MarkerAndArchiveTests(unittest.TestCase):
                 b'("presidio" == extra) and ("3.14" > python_version)',
             )
             change_wheel_metadata(wheel, metadata)
-            actual = release.validate_wheel(
-                wheel, VERSION, release.parse_optional_dependencies(root), root
+            actual = release.parse_wheel_dependencies(
+                release.parse_metadata(metadata, wheel.name)
             )
+            with self.assertRaisesRegex(
+                release.ReleaseEvidenceError, "differs from reviewed source"
+            ):
+                release.validate_wheel(
+                    wheel, VERSION, release.parse_optional_dependencies(root), root
+                )
             self.assertEqual(len(actual), 4)
             self.assertIn(
                 'extra == "presidio" and python_version < "3.14"',

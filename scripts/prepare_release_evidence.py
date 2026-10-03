@@ -8,6 +8,7 @@ import ast
 import base64
 import csv
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -29,6 +30,15 @@ if sys.version_info >= (3, 11):
     import tomllib
 else:
     import tomli as tomllib
+
+
+_spec = importlib.util.spec_from_file_location(
+    "trusted_archive_limits", Path(__file__).resolve().with_name("archive_limits.py")
+)
+if _spec is None or _spec.loader is None:
+    raise RuntimeError("Missing archive limits helper")
+limits = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(limits)
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_NAME = "bedrock-guardrail-firewall"
@@ -481,6 +491,11 @@ def validate_wheel(
     *,
     snapshot: bytes | None = None,
 ) -> list[dict[str, str]]:
+    snapshot = artifact_snapshot(path) if snapshot is None else snapshot
+    try:
+        limits.check_zip_structure(snapshot)
+    except limits.ArchiveLimitError as exc:
+        raise ReleaseEvidenceError(str(exc)) from exc
     metadata_values: list[bytes] = []
     record_values: list[tuple[str, bytes]] = []
     required_members = {
@@ -495,8 +510,13 @@ def validate_wheel(
     ) as archive:
         names: set[str] = set()
         portable_names: set[str] = set()
+        platforms: set[int] = set()
         file_values: dict[str, bytes] = {}
         for member in archive.infolist():
+            require(
+                member.orig_filename == member.filename,
+                "Wheel filename was truncated or aliased",
+            )
             validate_public_member(member.filename)
             name = member.filename.rstrip("/")
             require(name not in names, f"Wheel contains a duplicate member: {name!r}")
@@ -508,6 +528,7 @@ def validate_wheel(
             )
             portable_names.add(portable_name)
             mode = member.external_attr >> 16
+            platforms.add(member.create_system)
             require(
                 not stat.S_ISLNK(mode),
                 f"Wheel contains a symbolic link: {member.filename!r}",
@@ -516,9 +537,27 @@ def validate_wheel(
                 member.flag_bits & 1 == 0,
                 f"Wheel contains an encrypted member: {member.filename!r}",
             )
-            if member.is_dir():
-                continue
-            value = archive.read(member)
+            require(not member.is_dir(), "Wheel contains an unreviewed directory")
+            expected_mode = (
+                0o100664
+                if name.endswith(".dist-info/RECORD")
+                else (0o100666 if member.create_system == 0 else 0o100644)
+            )
+            require(
+                member.create_system in {0, 3}
+                and member.create_version == member.extract_version == 20
+                and member.flag_bits == 0
+                and member.external_attr == expected_mode << 16
+                and member.internal_attr == 0
+                and not member.extra
+                and not member.comment,
+                "Wheel contains an unreviewed member attribute or ZIP metadata",
+            )
+            with archive.open(member) as stream:
+                value = stream.read(member.file_size + 1)
+            require(
+                len(value) == member.file_size, "Wheel member decoded size mismatch"
+            )
             file_values[name] = value
             if source_root is not None:
                 if name in required_members:
@@ -553,6 +592,7 @@ def validate_wheel(
                 metadata_values.append(value)
             if member.filename.endswith(".dist-info/RECORD"):
                 record_values.append((name, value))
+    require(len(platforms) == 1, "Wheel mixes platform attribute conventions")
     require(
         required_members.issubset(file_values),
         "Wheel is missing required package files",
@@ -574,6 +614,19 @@ def validate_wheel(
         actual_identity == expected_identity,
         "Wheel optional dependencies do not match the pinned requirement files",
     )
+
+    if source_root is not None:
+        approved = reviewed_wheel_members(source_root, version)
+        record_name = f"{ARCHIVE_NAME}-{version}.dist-info/RECORD"
+        require(
+            names == set(file_values) == set(approved) | {record_name},
+            "Wheel does not contain the exact reviewed file and metadata set",
+        )
+        for name, alternatives in approved.items():
+            require(
+                file_values[name] in alternatives,
+                f"Wheel metadata or source differs from reviewed source: {name!r}",
+            )
 
     record_name, record_value = record_values[0]
     record_rows: dict[str, tuple[str, str]] = {}
@@ -792,6 +845,48 @@ def generated_sdist_members(
     return generated
 
 
+def reviewed_wheel_members(source_root: Path, version: str) -> dict[str, set[bytes]]:
+    """Construct every installed byte from authenticated static source only."""
+    sources = reviewed_sdist_sources(source_root)
+    document = tomllib.loads(sources["pyproject.toml"].decode("utf-8"))
+    require(
+        document.get("build-system")
+        == {
+            "requires": ["setuptools==84.0.0", "wheel==0.48.0"],
+            "build-backend": "setuptools.build_meta",
+        },
+        "Unsupported static wheel backend conventions",
+    )
+    generated = generated_sdist_members(source_root, sources)
+    prefix = f"{ARCHIVE_NAME}-{version}.dist-info/"
+    metadata = generated["PKG-INFO"]
+    members = {
+        f"{ARCHIVE_NAME}/{name}": {(source_root / name).read_bytes()}
+        for name in (
+            "__init__.py",
+            "orchestrator.py",
+            "guardrail_policy.json",
+            "guardrail_policy_profiles.json",
+            "py.typed",
+        )
+    }
+    members[prefix + "METADATA"] = {metadata, metadata.replace(b"\n", b"\r\n")}
+    members[prefix + "WHEEL"] = {
+        b"Wheel-Version: 1.0\nGenerator: setuptools (84.0.0)\n"
+        b"Root-Is-Purelib: true\nTag: py3-none-any\n\n"
+    }
+    for name in ("entry_points.txt", "top_level.txt"):
+        members[prefix + name] = {generated[ARCHIVE_NAME + ".egg-info/" + name]}
+    for name in document["project"].get("license-files", []):
+        validate_public_member(name)
+        require(
+            name in {"LICENSE", "NOTICE"} and name in sources,
+            "Unsupported wheel license path",
+        )
+        members[prefix + "licenses/" + name] = {sources[name]}
+    return members
+
+
 MAX_RELEASE_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_RELEASE_TAR_BYTES = 128 * 1024 * 1024
 
@@ -848,6 +943,11 @@ def artifact_snapshot(path: Path) -> bytes:
 
 
 def checked_tar_container(path: Path, compressed: bytes) -> bytes:
+    try:
+        with limits.bounded_tar_stream(compressed):
+            pass
+    except limits.ArchiveLimitError as exc:
+        raise ReleaseEvidenceError(str(exc)) from exc
     require(
         compressed[:3] == b"\x1f\x8b\x08" and len(compressed) >= 18,
         "Source distribution must be one gzip stream",

@@ -18,8 +18,8 @@ METADATA = (
     f"""Metadata-Version: 2.4
 Name: bedrock-guardrail-firewall
 Version: {VERSION}
-Requires-Python: >=3.10
 License-Expression: Apache-2.0
+Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 Provides-Extra: aws
 Requires-Dist: boto3==1.43.82; extra == "aws"
@@ -34,6 +34,14 @@ Provides-Extra: presidio
 ).encode()
 
 
+def canonical_wheel_info(name: str) -> zipfile.ZipInfo:
+    """Independent fixture for the observed pinned backend's Unix convention."""
+    member = zipfile.ZipInfo(name)
+    member.create_system = 3
+    member.external_attr = (0o100664 if name.endswith("/RECORD") else 0o100644) << 16
+    return member
+
+
 class ReleaseEvidenceTests(unittest.TestCase):
     def test_wheel_rejects_unreviewed_installation_code(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -42,7 +50,9 @@ class ReleaseEvidenceTests(unittest.TestCase):
             self.make_distributions(root / "dist")
             wheel = next((root / "dist").glob("*.whl"))
             with zipfile.ZipFile(wheel, "a") as archive:
-                archive.writestr("injected.pth", "import injected")
+                archive.writestr(
+                    canonical_wheel_info("injected.pth"), "import injected"
+                )
             with self.assertRaisesRegex(
                 release.ReleaseEvidenceError, "unreviewed member"
             ):
@@ -114,6 +124,8 @@ class ReleaseEvidenceTests(unittest.TestCase):
     def make_source(self, root: Path) -> None:
         (root / "scripts").mkdir()
         (root / "pyproject.toml").write_text(
+            '[build-system]\nrequires = ["setuptools==84.0.0", "wheel==0.48.0"]\n'
+            'build-backend = "setuptools.build_meta"\n'
             f'[project]\nname = "bedrock-guardrail-firewall"\nversion = "{VERSION}"\n'
             'readme = "README.md"\nlicense = "Apache-2.0"\nlicense-files = []\n'
             'requires-python = ">=3.10"\n'
@@ -177,6 +189,15 @@ class ReleaseEvidenceTests(unittest.TestCase):
             )
         }
         wheel_files[f"{dist_info}/METADATA"] = METADATA
+        wheel_files[f"{dist_info}/WHEEL"] = (
+            b"Wheel-Version: 1.0\nGenerator: setuptools (84.0.0)\n"
+            b"Root-Is-Purelib: true\nTag: py3-none-any\n\n"
+        )
+        wheel_files[f"{dist_info}/top_level.txt"] = b"bedrock_guardrail_firewall\n"
+        wheel_files[f"{dist_info}/entry_points.txt"] = (
+            b"[console_scripts]\nbedrock-guardrail-firewall = "
+            b"bedrock_guardrail_firewall.orchestrator:main\n"
+        )
         record_name = f"{dist_info}/RECORD"
         record_output = io.StringIO(newline="")
         writer = csv.writer(record_output, lineterminator="\n")
@@ -189,7 +210,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
         wheel_files[record_name] = record_output.getvalue().encode()
         with zipfile.ZipFile(wheel, mode="w") as archive:
             for name, value in wheel_files.items():
-                archive.writestr(name, value)
+                archive.writestr(canonical_wheel_info(name), value)
 
         sdist = dist / f"bedrock_guardrail_firewall-{VERSION}.tar.gz"
         with tarfile.open(sdist, mode="w:gz") as archive:

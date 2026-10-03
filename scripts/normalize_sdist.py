@@ -4,15 +4,24 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gzip
 import hashlib
+import importlib.util
 import os
 import re
 import tarfile
 import tempfile
 import unicodedata
-from io import BytesIO
 from pathlib import Path
+
+_spec = importlib.util.spec_from_file_location(
+    "trusted_archive_limits", Path(__file__).resolve().with_name("archive_limits.py")
+)
+if _spec is None or _spec.loader is None:
+    raise RuntimeError("Missing archive limits helper")
+limits = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(limits)
 
 
 class SdistNormalizationError(RuntimeError):
@@ -50,48 +59,79 @@ def content_digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def read_members(path: Path) -> list[tuple[tarfile.TarInfo, bytes | None]]:
-    members: list[tuple[tarfile.TarInfo, bytes | None]] = []
-    names: set[str] = set()
-    portable_names: set[str] = set()
-    with tarfile.open(path, mode="r:gz") as archive:
-        for member in archive.getmembers():
-            validate_member_name(member.name)
-            name = member.name.rstrip("/")
-            require(name not in names, f"Archive contains a duplicate member: {name!r}")
-            names.add(name)
-            portable_name = unicodedata.normalize("NFC", name).casefold()
-            require(
-                portable_name not in portable_names,
-                f"Archive contains a non-portable duplicate member: {name!r}",
-            )
-            portable_names.add(portable_name)
-            require(
-                member.isfile() or member.isdir(),
-                f"Archive contains a link or device: {member.name!r}",
-            )
-            value = None
-            if member.isfile():
-                handle = archive.extractfile(member)
-                require(handle is not None, f"Unable to read archive member: {name!r}")
-                value = handle.read()
-                require(
-                    len(value) == member.size, f"Archive member is truncated: {name!r}"
-                )
-            members.append((member, value))
-    return members
+@contextlib.contextmanager
+def read_members(path: Path):
+    """Retain bounded metadata and content digests, with bodies in a disk spool."""
+    try:
+        compressed = limits.regular_snapshot(path)
+        with limits.bounded_tar_stream(compressed) as stream:
+            members = []
+            names, portable_names = set(), set()
+            total = 0
+            with tarfile.open(fileobj=stream, mode="r:") as archive:
+                for member in archive:
+                    require(
+                        len(members) < limits.MAX_MEMBERS,
+                        "Archive member count budget exceeded",
+                    )
+                    require(
+                        0 <= member.size <= limits.MAX_MEMBER_BYTES,
+                        "Archive member byte budget exceeded",
+                    )
+                    total += member.size
+                    require(
+                        total <= limits.MAX_TOTAL_BYTES,
+                        "Archive total byte budget exceeded",
+                    )
+                    validate_member_name(member.name)
+                    name = member.name.rstrip("/")
+                    require(
+                        name not in names,
+                        f"Archive contains a duplicate member: {name!r}",
+                    )
+                    names.add(name)
+                    portable = unicodedata.normalize("NFC", name).casefold()
+                    require(
+                        portable not in portable_names,
+                        f"Archive contains a non-portable duplicate member: {name!r}",
+                    )
+                    portable_names.add(portable)
+                    require(
+                        member.isfile() or member.isdir(),
+                        f"Archive contains a link or device: {name!r}",
+                    )
+                    digest = hashlib.sha256()
+                    if member.isfile():
+                        handle = archive.extractfile(member)
+                        require(handle is not None, "Unable to read archive member")
+                        with handle:
+                            remaining = member.size
+                            while remaining:
+                                block = handle.read(min(remaining, limits.CHUNK_BYTES))
+                                require(
+                                    bool(block),
+                                    f"Archive member is truncated: {name!r}",
+                                )
+                                digest.update(block)
+                                remaining -= len(block)
+                            require(
+                                not handle.read(1),
+                                "Archive member exceeds declared size",
+                            )
+                    members.append((member, digest.hexdigest()))
+            yield stream, members
+    except limits.ArchiveLimitError as exc:
+        raise SdistNormalizationError(str(exc)) from exc
 
 
-def member_identity(
-    members: list[tuple[tarfile.TarInfo, bytes | None]],
-) -> list[tuple[str, str, int]]:
+def member_identity(members):
     return [
         (
             member.name.rstrip("/"),
-            "directory" if member.isdir() else content_digest(value or b""),
-            0 if value is None else len(value),
+            "directory" if member.isdir() else digest,
+            member.size,
         )
-        for member, value in members
+        for member, digest in members
     ]
 
 
@@ -105,59 +145,58 @@ def normalize_sdist(path: Path, source_date_epoch: int) -> str:
         source_date_epoch <= 0xFFFFFFFF,
         "SOURCE_DATE_EPOCH exceeds the gzip timestamp range",
     )
-    members = read_members(path)
-    original_identity = member_identity(members)
-
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     os.close(descriptor)
     temporary_path = Path(temporary_name)
     try:
-        with (
-            temporary_path.open("wb") as raw_output,
-            gzip.GzipFile(
-                filename="",
-                mode="wb",
-                compresslevel=9,
-                fileobj=raw_output,
-                mtime=source_date_epoch,
-            ) as gzip_output,
-            tarfile.open(
-                fileobj=gzip_output,
-                mode="w|",
-                format=tarfile.PAX_FORMAT,
-            ) as output,
-        ):
-            for original, value in sorted(members, key=lambda item: item[0].name):
-                normalized = tarfile.TarInfo(original.name.rstrip("/"))
-                normalized.mtime = 0
-                normalized.uid = 0
-                normalized.gid = 0
-                normalized.uname = ""
-                normalized.gname = ""
-                normalized.pax_headers = {}
-                if original.isdir():
-                    normalized.type = tarfile.DIRTYPE
-                    normalized.mode = 0o755
-                    normalized.size = 0
-                    output.addfile(normalized)
-                else:
-                    require(value is not None, "Regular archive member has no data")
-                    normalized.type = tarfile.REGTYPE
-                    normalized.mode = 0o755 if original.mode & 0o111 else 0o644
-                    normalized.size = len(value)
-                    output.addfile(normalized, BytesIO(value))
-        normalized_members = read_members(temporary_path)
-        require(
-            member_identity(normalized_members) == sorted(original_identity),
-            "Normalized archive changed names or file contents",
-        )
+        with read_members(path) as (source_stream, members):
+            original_identity = member_identity(members)
+            with (
+                temporary_path.open("wb") as raw_output,
+                gzip.GzipFile(
+                    filename="",
+                    mode="wb",
+                    compresslevel=9,
+                    fileobj=raw_output,
+                    mtime=source_date_epoch,
+                ) as gzip_output,
+                tarfile.open(
+                    fileobj=gzip_output,
+                    mode="w|",
+                    format=tarfile.PAX_FORMAT,
+                ) as output,
+            ):
+                for original, _ in sorted(members, key=lambda item: item[0].name):
+                    normalized = tarfile.TarInfo(original.name.rstrip("/"))
+                    normalized.mtime = 0
+                    normalized.uid = 0
+                    normalized.gid = 0
+                    normalized.uname = ""
+                    normalized.gname = ""
+                    normalized.pax_headers = {}
+                    if original.isdir():
+                        normalized.type = tarfile.DIRTYPE
+                        normalized.mode = 0o755
+                        normalized.size = 0
+                        output.addfile(normalized)
+                    else:
+                        normalized.type = tarfile.REGTYPE
+                        normalized.mode = 0o755 if original.mode & 0o111 else 0o644
+                        normalized.size = original.size
+                        source_stream.seek(original.offset_data)
+                        output.addfile(normalized, source_stream)
+        with read_members(temporary_path) as (_, normalized_members):
+            require(
+                member_identity(normalized_members) == sorted(original_identity),
+                "Normalized archive changed names or file contents",
+            )
         temporary_path.replace(path)
     finally:
         if temporary_path.exists():
             temporary_path.unlink()
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256(limits.regular_snapshot(path)).hexdigest()
     return digest
 
 
