@@ -233,3 +233,18 @@ The runtime refuses to start when the loaded bundle differs.
 6. Record the new policy version and digest.
 7. Deploy in monitor mode when appropriate.
 8. Pin the approved digest before enforcement.
+
+## Exact boolean controls
+
+The citation_required, aws_guardrail_required and presidio_required fields accept
+only JSON true or false. Strings, numbers, arrays, objects and null are
+configuration errors. Required controls are never inferred through language
+truthiness. Valid policy digests and literal boolean behavior are unchanged.
+
+Built-in recognizers for ASCII credential, email, IBAN and CUI formats use ASCII
+word boundaries. Ordinary Unicode text alongside a supported format is a
+separator; a larger ASCII word/identifier retains the existing boundary rules.
+Unicode normalization, private-key handling and recognizer work limits remain
+in force.
+ASCII flags are scoped to the AWS secret label and token alphabet so that
+assignment separators retain the existing Unicode whitespace syntax.

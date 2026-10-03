@@ -932,7 +932,26 @@ class CrossProcessFileLock:
                 self._namespace = None
 
 
-def _atomic_json_write(path: Path, value: Any, *, create_only: bool = False) -> None:
+MAX_BEHAVIOR_STATE_BYTES = 16_777_216
+
+
+def _compact_state_json(value: Any) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+
+
+def _atomic_json_write(
+    path: Path,
+    value: Any,
+    *,
+    create_only: bool = False,
+    compact: bool = False,
+    maximum_bytes: int | None = None,
+) -> None:
+    encoded = _compact_state_json(value) + b"\n" if compact else None
+    if maximum_bytes is not None and (encoded is None or len(encoded) > maximum_bytes):
+        raise StorageError("Encoded state exceeds its write budget")
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
@@ -940,9 +959,14 @@ def _atomic_json_write(path: Path, value: Any, *, create_only: bool = False) -> 
             prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
         )
         temp_path = Path(raw_temp_path)
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(value, handle, ensure_ascii=True, indent=2, sort_keys=True)
-            handle.write("\n")
+        mode = "wb" if compact else "w"
+        options = {} if compact else {"encoding": "utf-8", "newline": "\n"}
+        with os.fdopen(descriptor, mode, **options) as handle:
+            if encoded is None:
+                json.dump(value, handle, ensure_ascii=True, indent=2, sort_keys=True)
+                handle.write("\n")
+            else:
+                handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
         with contextlib.suppress(OSError):
@@ -1237,6 +1261,12 @@ PROFILE_ALLOWED_KEYS = {
     "prompt_attack_threshold",
     "risk_thresholds",
 }
+
+
+def _validate_policy_bool(value: Any, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise ConfigurationError(f"{field_name} must be a JSON boolean")
+    return value
 
 
 def _require_keys(payload: Mapping[str, Any], required: set[str], label: str) -> None:
@@ -1640,7 +1670,9 @@ def load_policy_bundle(policy_path: Path, profiles_path: Path) -> PolicyBundle:
     _reject_unknown_keys(grounding_raw, grounding_allowed, "policy.grounding")
     _require_keys(grounding_raw, grounding_allowed, "policy.grounding")
     grounding = {
-        "citation_required": bool(grounding_raw["citation_required"]),
+        "citation_required": _validate_policy_bool(
+            grounding_raw["citation_required"], "policy.grounding.citation_required"
+        ),
         "citation_min_words": int(grounding_raw["citation_min_words"]),
         "minimum_token_length": int(grounding_raw["minimum_token_length"]),
     }
@@ -1724,8 +1756,13 @@ def load_policy_bundle(policy_path: Path, profiles_path: Path) -> PolicyBundle:
                 raw_profile["presidio_failure_action"],
                 field_name=f"profile.{name}.presidio_failure_action",
             ),
-            aws_guardrail_required=bool(raw_profile["aws_guardrail_required"]),
-            presidio_required=bool(raw_profile["presidio_required"]),
+            aws_guardrail_required=_validate_policy_bool(
+                raw_profile["aws_guardrail_required"],
+                f"profile.{name}.aws_guardrail_required",
+            ),
+            presidio_required=_validate_policy_bool(
+                raw_profile["presidio_required"], f"profile.{name}.presidio_required"
+            ),
             risk_thresholds=_validate_risk_thresholds(
                 raw_profile["risk_thresholds"], f"profile.{name}.risk_thresholds"
             ),
@@ -2269,7 +2306,9 @@ REGEX_RECOGNIZERS = (
     ),
     RegexRecognizer(
         "IBAN_CODE",
-        re.compile(r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b", re.IGNORECASE),
+        re.compile(
+            r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b", re.IGNORECASE | re.ASCII
+        ),
         0.9,
         checksum="iban",
     ),
@@ -2278,7 +2317,8 @@ REGEX_RECOGNIZERS = (
         re.compile(
             r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
             r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@"
-            r"[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}\b"
+            r"[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}\b",
+            re.ASCII,
         ),
         0.75,
     ),
@@ -2289,31 +2329,31 @@ REGEX_RECOGNIZERS = (
     ),
     RegexRecognizer(
         "AWS_ACCESS_KEY",
-        re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+        re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", re.ASCII),
         0.99,
     ),
     RegexRecognizer(
         "AWS_SECRET_ACCESS_KEY",
         re.compile(
-            r"\b(?:aws_secret_access_key|SecretAccessKey|AWSSecretAccessKey)\b"
-            r"['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9/+=]{40}['\"]?",
+            r"(?a:\b(?:aws_secret_access_key|SecretAccessKey|AWSSecretAccessKey)\b)"
+            r"['\"]?\s*[:=]\s*['\"]?(?a:[A-Za-z0-9/+=]{40})['\"]?",
             re.IGNORECASE,
         ),
         0.99,
     ),
     RegexRecognizer(
         "GITHUB_TOKEN",
-        re.compile(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,255}\b"),
+        re.compile(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,255}\b", re.ASCII),
         0.99,
     ),
     RegexRecognizer(
         "SLACK_TOKEN",
-        re.compile(r"\b(?:xox[baprs]|xapp)-[A-Za-z0-9-]{10,200}\b"),
+        re.compile(r"\b(?:xox[baprs]|xapp)-[A-Za-z0-9-]{10,200}\b", re.ASCII),
         0.99,
     ),
     RegexRecognizer(
         "OPENAI_API_KEY",
-        re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,200}\b"),
+        re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,200}\b", re.ASCII),
         0.98,
     ),
     RegexRecognizer(
@@ -2336,7 +2376,7 @@ REGEX_RECOGNIZERS = (
         "CUI_MARKING",
         re.compile(
             r"\b(?:CUI//[A-Z0-9/-]+|CONTROLLED UNCLASSIFIED INFORMATION|NOFORN)\b",
-            re.IGNORECASE,
+            re.IGNORECASE | re.ASCII,
         ),
         0.8,
     ),
@@ -3673,6 +3713,19 @@ class BedrockGuardrailAdapter:
             )
 
 
+def _can_invoke_external(detections: Sequence[Detection]) -> bool:
+    current = (
+        _max_action(*(item.action for item in detections))
+        if detections
+        else GuardrailAction.ALLOW
+    )
+    return current not in {
+        GuardrailAction.REVIEW,
+        GuardrailAction.ESCALATE,
+        GuardrailAction.BLOCK,
+    }
+
+
 class BehaviorStore:
     def __init__(self, config: RuntimeConfig):
         self.path = config.data_dir / "behavior.json"
@@ -3684,7 +3737,7 @@ class BehaviorStore:
         if not self.path.exists():
             return {"schema_version": 1, "subjects": {}}
         try:
-            value = _load_json_file(self.path, maximum_bytes=16_777_216)
+            value = _load_json_file(self.path, maximum_bytes=MAX_BEHAVIOR_STATE_BYTES)
         except ConfigurationError as exc:
             raise StorageError("Behavior state is unreadable") from exc
         if not isinstance(value, dict) or not isinstance(
@@ -3716,6 +3769,34 @@ class BehaviorStore:
             )
             for subject_id in ordered[: len(subjects) - self.max_subjects]:
                 subjects.pop(subject_id, None)
+
+        # Canonical ASCII JSON gives an exact additive encoded-byte size:
+        # envelope + each key/value body + one comma between subject entries.
+        envelope = {**state, "subjects": {}}
+        entry_sizes = {
+            key: len(_compact_state_json({key: value})) - 2
+            for key, value in subjects.items()
+        }
+        encoded_size = (
+            len(_compact_state_json(envelope))
+            + 1
+            + sum(entry_sizes.values())
+            + max(len(subjects) - 1, 0)
+        )
+        if encoded_size > MAX_BEHAVIOR_STATE_BYTES:
+            ordered = sorted(
+                subjects,
+                key=lambda item: (str(subjects[item].get("last_seen", "")), item),
+            )
+            for subject_id in ordered:
+                if encoded_size <= MAX_BEHAVIOR_STATE_BYTES:
+                    break
+                encoded_size -= entry_sizes[subject_id] + (
+                    1 if len(subjects) > 1 else 0
+                )
+                del subjects[subject_id]
+        if encoded_size > MAX_BEHAVIOR_STATE_BYTES:
+            raise StorageError("Behavior state envelope exceeds its byte budget")
 
     def score(self, subject_id: str) -> float:
         if subject_id == "anonymous":
@@ -3763,7 +3844,12 @@ class BehaviorStore:
                 profile["high_risk"] = int(profile.get("high_risk", 0)) + 1
             profile["last_seen"] = _utcnow().isoformat()
             self._prune(state)
-            _atomic_json_write(self.path, state)
+            _atomic_json_write(
+                self.path,
+                state,
+                compact=True,
+                maximum_bytes=MAX_BEHAVIOR_STATE_BYTES,
+            )
 
 
 class MetricsStore:
@@ -4155,18 +4241,43 @@ class AuditStore:
     ) -> dict[str, Any]:
         # The checkpoint must come from a separately trusted source, never chain.json.
         checkpoint_supplied = expected_count is not None
-        if checkpoint_supplied and (
-            isinstance(expected_count, bool)
-            or not isinstance(expected_count, int)
-            or expected_count < 0
-            or (
-                expected_count
-                and not re.fullmatch(r"[0-9a-f]{64}", expected_last_hash or "")
+        if (not checkpoint_supplied and expected_last_hash is not None) or (
+            checkpoint_supplied
+            and (
+                type(expected_count) is not int
+                or expected_count < 0
+                or (expected_count == 0 and expected_last_hash is not None)
+                or (
+                    expected_count > 0
+                    and (
+                        not isinstance(expected_last_hash, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", expected_last_hash)
+                    )
+                )
             )
         ):
             raise InputValidationError("Invalid trusted audit checkpoint")
         previous_hash: str | None = None
         checked = 0
+
+        def checkpoint_result() -> dict[str, Any]:
+            matches = (
+                checkpoint_supplied
+                and expected_count == checked
+                and expected_last_hash == previous_hash
+            )
+            return {
+                "ok": matches,
+                "integrity_ok": True,
+                "checked": checked,
+                "last_hash": previous_hash,
+                "error": None
+                if matches
+                else "trusted_checkpoint_mismatch"
+                if checkpoint_supplied
+                else "trusted_checkpoint_required",
+            }
+
         with CrossProcessFileLock(self.lock_path):
             try:
                 with self._read_events() as handle:
@@ -4225,7 +4336,7 @@ class AuditStore:
                         checked += 1
             except FileNotFoundError:
                 try:
-                    _load_json_file(self.chain_path, maximum_bytes=65_536)
+                    empty_head = _load_json_file(self.chain_path, maximum_bytes=65_536)
                 except ConfigurationError as head_error:
                     if not isinstance(head_error.__cause__, FileNotFoundError):
                         return {
@@ -4234,19 +4345,17 @@ class AuditStore:
                             "error": "audit_chain_head_unreadable",
                         }
                 else:
-                    return {
-                        "ok": False,
-                        "checked": 0,
-                        "error": "audit_events_missing",
-                    }
-                return {
-                    "ok": checkpoint_supplied and expected_count == 0,
-                    "integrity_ok": True,
-                    "checked": 0,
-                    "error": None
-                    if checkpoint_supplied and expected_count == 0
-                    else "trusted_checkpoint_required",
-                }
+                    if (
+                        not isinstance(empty_head, dict)
+                        or "last_hash" not in empty_head
+                        or empty_head["last_hash"] is not None
+                    ):
+                        return {
+                            "ok": False,
+                            "checked": 0,
+                            "error": "audit_events_missing",
+                        }
+                return checkpoint_result()
             except (
                 OSError,
                 ConfigurationError,
@@ -4260,39 +4369,30 @@ class AuditStore:
                     "error": "audit_read_failure",
                     "error_type": _safe_error_type(exc),
                 }
-        try:
-            chain = _load_json_file(self.chain_path, maximum_bytes=65_536)
-        except ConfigurationError as exc:
-            return {
-                "ok": False,
-                "checked": checked,
-                "error": "audit_chain_head_missing"
-                if isinstance(exc.__cause__, FileNotFoundError)
-                else "audit_chain_head_unreadable",
-                "error_type": _safe_error_type(exc),
-            }
-        if not isinstance(chain, dict) or chain.get("last_hash") != previous_hash:
-            return {
-                "ok": False,
-                "checked": checked,
-                "error": "audit_chain_head_mismatch",
-            }
-        matches = (
-            checkpoint_supplied
-            and expected_count == checked
-            and (expected_last_hash == previous_hash)
-        )
-        return {
-            "ok": matches,
-            "integrity_ok": True,
-            "checked": checked,
-            "last_hash": previous_hash,
-            "error": None
-            if matches
-            else "trusted_checkpoint_mismatch"
-            if checkpoint_supplied
-            else "trusted_checkpoint_required",
-        }
+            try:
+                chain = _load_json_file(self.chain_path, maximum_bytes=65_536)
+            except ConfigurationError as exc:
+                if checked == 0 and isinstance(exc.__cause__, FileNotFoundError):
+                    return checkpoint_result()
+                return {
+                    "ok": False,
+                    "checked": checked,
+                    "error": "audit_chain_head_missing"
+                    if isinstance(exc.__cause__, FileNotFoundError)
+                    else "audit_chain_head_unreadable",
+                    "error_type": _safe_error_type(exc),
+                }
+            if (
+                not isinstance(chain, dict)
+                or "last_hash" not in chain
+                or chain["last_hash"] != previous_hash
+            ):
+                return {
+                    "ok": False,
+                    "checked": checked,
+                    "error": "audit_chain_head_mismatch",
+                }
+            return checkpoint_result()
 
 
 class ReviewStore:
@@ -4903,16 +5003,9 @@ class BedrockGuardrailSystem:
                 )
             )
 
-        local_action = (
-            _max_action(*(item.action for item in ctx.detections))
-            if ctx.detections
-            else GuardrailAction.ALLOW
+        skip_live_aws = self.config.aws_mode == "live" and not _can_invoke_external(
+            ctx.detections
         )
-        skip_live_aws = self.config.aws_mode == "live" and local_action in {
-            GuardrailAction.REVIEW,
-            GuardrailAction.ESCALATE,
-            GuardrailAction.BLOCK,
-        }
         aws_input_action = GuardrailAction.ALLOW
         if skip_live_aws:
             ctx.diagnostics.append("aws_input:skipped_local_decision")
@@ -4954,7 +5047,10 @@ class BedrockGuardrailSystem:
                 ctx.diagnostics.append("aws_input_output:rechecked")
 
         if ctx.sanitized_output:
-            if skip_live_aws or aws_input_action in {
+            if (
+                self.config.aws_mode == "live"
+                and not _can_invoke_external(ctx.detections)
+            ) or aws_input_action in {
                 GuardrailAction.REVIEW,
                 GuardrailAction.ESCALATE,
                 GuardrailAction.BLOCK,
