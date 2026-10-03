@@ -14,7 +14,7 @@ import orchestrator as app
 from tests import test_orchestrator as fixtures
 
 ROOT = Path(__file__).resolve().parents[1]
-SECRET = "Synthetic protected matching-name message."
+SYNTHETIC_REDIRECTED_TEXT = "Synthetic protected matching-name message."
 
 
 def replace_directory_with_link(path, destination):
@@ -48,7 +48,9 @@ class CliReadBoundaryTests(unittest.TestCase):
             protected.mkdir()
             path = requested / "input.txt"
             path.write_text("A safe requested message.", encoding="utf-8")
-            (protected / path.name).write_text(SECRET, encoding="utf-8")
+            (protected / path.name).write_text(
+                SYNTHETIC_REDIRECTED_TEXT, encoding="utf-8"
+            )
             swapped, attempted = False, False
             opener = app._windows_relative_open if os.name == "nt" else app.os.open
 
@@ -99,7 +101,7 @@ class CliReadBoundaryTests(unittest.TestCase):
                     json.loads(stdout.getvalue())["sanitized_input"],
                     "A safe requested message.",
                 )
-                self.assertNotIn(SECRET, stdout.getvalue())
+                self.assertNotIn(SYNTHETIC_REDIRECTED_TEXT, stdout.getvalue())
             finally:
                 if swapped:
                     remove_link(requested)
@@ -116,7 +118,9 @@ class CliReadBoundaryTests(unittest.TestCase):
                 protected.mkdir()
                 path = requested / "input.txt"
                 path.write_text("A safe requested message.", encoding="utf-8")
-                (protected / path.name).write_text(SECRET, encoding="utf-8")
+                (protected / path.name).write_text(
+                    SYNTHETIC_REDIRECTED_TEXT, encoding="utf-8"
+                )
                 original = app._reject_path_links
                 swapped = False
 
@@ -163,7 +167,9 @@ class CliReadBoundaryTests(unittest.TestCase):
                     ):
                         code = app.main(args)
                     self.assertTrue(swapped)
-                    self.assertNotIn(SECRET, stdout.getvalue() + stderr.getvalue())
+                    self.assertNotIn(
+                        SYNTHETIC_REDIRECTED_TEXT, stdout.getvalue() + stderr.getvalue()
+                    )
                     self.assertNotEqual(code, app.EXIT_OK)
                 finally:
                     if swapped:
