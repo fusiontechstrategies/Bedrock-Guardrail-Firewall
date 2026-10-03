@@ -1322,6 +1322,43 @@ class AuditAndStateTests(GuardrailTestCase):
         result = system.process("A safe request.", {})
         self.assertEqual(result["action"], "block")
         self.assertIn("local_audit_failed", result["diagnostics"])
+        totals = system.metrics.report()["totals"]
+        self.assertEqual(totals["events"], 1)
+        self.assertEqual(totals["blocked"], 1)
+        self.assertEqual(totals["allowed"], 0)
+
+    def test_metrics_count_required_audit_failures_as_final_blocks(self):
+        for failure in ("remote_required_failed", "signing_required_failed"):
+            with self.subTest(failure=failure):
+                system = self.make_system()
+                with patch.object(system.audit, "write", return_value={failure: True}):
+                    result = system.process("A safe request.", {})
+                self.assertEqual(result["action"], "block")
+                self.assertFalse(result["content_released"])
+                totals = system.metrics.report()["totals"]
+                self.assertEqual(totals["events"], 1)
+                self.assertEqual(totals["blocked"], 1)
+                self.assertEqual(totals["allowed"], 0)
+
+    def test_unrecorded_request_does_not_add_an_outcome_metric(self):
+        system = self.make_system()
+        with patch.object(system.audit, "write") as audit:
+            result = system.process("A safe request.", {}, record=False)
+        audit.assert_not_called()
+        self.assertEqual(result["action"], "allow")
+        self.assertEqual(system.metrics.report()["totals"]["events"], 0)
+
+    def test_metrics_failure_remains_noncritical_after_audit(self):
+        system = self.make_system()
+        with patch.object(
+            system.metrics, "record", side_effect=app.StorageError("synthetic")
+        ) as metrics:
+            result = system.process("A safe request.", {})
+        metrics.assert_called_once()
+        self.assertEqual(result["action"], "allow")
+        self.assertTrue(result["content_released"])
+        self.assertEqual(result["audit"]["status"], "recorded")
+        self.assertIn("noncritical_state_update_failed", result["diagnostics"])
 
     def test_metrics_are_metadata_only(self):
         system = self.make_system()
@@ -1329,6 +1366,8 @@ class AuditAndStateTests(GuardrailTestCase):
         report = system.metrics.report()
         encoded = json.dumps(report)
         self.assertEqual(report["totals"]["events"], 1)
+        self.assertEqual(report["totals"]["allowed"], 1)
+        self.assertEqual(report["totals"]["blocked"], 0)
         self.assertNotIn("A safe request", encoded)
 
     def test_empty_audit_chain_verifies(self):
@@ -1787,6 +1826,31 @@ class CommandLineTests(unittest.TestCase):
             code = app.main(["policy-template"])
         self.assertEqual(code, app.EXIT_OK)
         self.assertEqual(json.loads(stdout.getvalue())["schema_version"], 2)
+        profiles = io.StringIO()
+        with patch("sys.stdout", profiles):
+            profile_code = app.main(["policy-profiles-template"])
+        self.assertEqual(profile_code, app.EXIT_OK)
+        with PrivateTemporaryDirectory(
+            prefix="generated-policy-positive-"
+        ) as directory:
+            root = Path(directory)
+            policy_path = root / "policy.json"
+            profiles_path = root / "profiles.json"
+            policy_path.write_text(stdout.getvalue(), encoding="utf-8")
+            profiles_path.write_text(profiles.getvalue(), encoding="utf-8")
+            bundle = app.load_policy_bundle(policy_path, profiles_path)
+            system = app.BedrockGuardrailSystem(
+                base_config(
+                    root / "state",
+                    policy_path=policy_path,
+                    profiles_path=profiles_path,
+                ),
+                policy_bundle=bundle,
+                privacy_key=TEST_KEY,
+            )
+            result = system.process("A safe request.", {}, record=False)
+            self.assertEqual(result["action"], "allow")
+            self.assertTrue(result["content_released"])
 
     def test_profiles_template_command(self):
         stdout = io.StringIO()
