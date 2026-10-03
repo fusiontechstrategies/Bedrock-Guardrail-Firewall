@@ -9,6 +9,7 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 ### Security
 
 - Require protected owner-only Windows final state namespaces and existing JSON leaves without silently repairing permissions. Create state temporaries, review/incident directories and evidence reservations through the pinned private descriptor helper before writing.
+- Preserve private POSIX state reads and writes below a retained root-owned sticky temporary ancestor; final directories and files still require private ownership and permissions.
 
 - Preserve Unicode separators and value whitespace for opaque-token labels while keeping label case matching and token alphabets explicitly ASCII.
 - Reject required integration profiles with release-permitting failure actions, validate runtime-required Presidio at startup, and enforce a minimum review on required failure paths.

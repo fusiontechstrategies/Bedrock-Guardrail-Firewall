@@ -691,7 +691,7 @@ def _load_json_file(
     try:
         _reject_path_links(path)
         if private_state:
-            with _auxiliary_namespace(path.parent) as parent_fd:
+            with _auxiliary_namespace(path.parent, trusted_parent=True) as parent_fd:
                 fd = _open_private_key(path, create=False, parent_fd=parent_fd)
                 try:
                     _validate_auxiliary_descriptor(fd)
@@ -980,7 +980,10 @@ def _atomic_json_write(
             CrossProcessFileLock(publication_lock)
             if publication_lock is not None
             else contextlib.nullcontext(),
-            _auxiliary_namespace(path.parent) as parent_fd,
+            # Permit the retained root-owned sticky temporary ancestor on POSIX.
+            # The final directory and every confidential leaf remain private;
+            # Windows final admission deliberately ignores traversal relaxation.
+            _auxiliary_namespace(path.parent, trusted_parent=True) as parent_fd,
         ):
             try:
                 # Refuse existing non-private leaves instead of repairing their
