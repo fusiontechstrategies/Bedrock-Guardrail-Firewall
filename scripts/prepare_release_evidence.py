@@ -728,9 +728,9 @@ def generated_sdist_members(
             markers.setdefault(marker, []).append(rendered)
         requirements.append("\n[" + group + "]\n")
         requirements.extend(item + "\n" for item in markers.pop("", []))
-        for marker, items in sorted(markers.items()):
+        for marker, marker_items in sorted(markers.items()):
             requirements.append("\n[" + group + ":" + marker + "]\n")
-            requirements.extend(item + "\n" for item in items)
+            requirements.extend(item + "\n" for item in marker_items)
     if license_files:
         fields.append(("Dynamic", "license-file"))
     require(project.get("readme") == "README.md", "Unsupported source README")

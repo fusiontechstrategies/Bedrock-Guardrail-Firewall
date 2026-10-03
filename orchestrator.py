@@ -632,7 +632,7 @@ def _windows_namespace_handles(path: Path, *, trusted: bool = False):
             if attributes.attributes & 0x400 or not attributes.attributes & 0x10:
                 raise ConfigurationError("Local input namespace uses a reparse point")
             if trusted and index:
-                _open_private_key(
+                verified_fd = _open_private_key(
                     Path("namespace"),
                     create=False,
                     directory=True,
@@ -640,6 +640,7 @@ def _windows_namespace_handles(path: Path, *, trusted: bool = False):
                     trusted_ancestor=True,
                     existing_handle=handle,
                 )
+                os.close(verified_fd)
         yield handles[-1]
     finally:
         for handle in reversed(handles):
@@ -2114,8 +2115,10 @@ def _open_private_key(
         finally:
             kernel.LocalFree(loaded)
         if existing_handle is not None:
+            # Return an owned descriptor consistently. The caller closes this
+            # duplicate; namespace context retains the original native handle.
             handle = None
-            return existing_handle
+            return _duplicate_windows_directory(existing_handle)
         fd = msvcrt.open_osfhandle(
             handle, (os.O_RDONLY if directory else os.O_RDWR) | os.O_BINARY
         )

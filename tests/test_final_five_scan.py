@@ -444,16 +444,44 @@ class AuxiliaryFileTests(GuardrailTestCase):
         system = self.make_system()
         legacy = system.config.data_dir / ".write-probe"
         legacy.write_bytes(b"leave me alone")
-        self.assertTrue(
+        self.assertEqual(
             next(x for x in system.doctor()["checks"] if x["name"] == "data_directory")[
                 "status"
-            ]
-            == "pass"
+            ],
+            "pass",
         )
         self.assertEqual(legacy.read_bytes(), b"leave me alone")
         self.assertFalse(
             list((system.config.data_dir / "locks").glob(".write-probe-*"))
         )
+
+    @unittest.skipUnless(os.name == "nt", "Windows native handle accounting")
+    def test_repeated_trusted_namespace_validation_does_not_leak_handles(self):
+        import ctypes
+        import ctypes.wintypes as wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel.GetProcessHandleCount.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+
+        def count():
+            value = wintypes.DWORD()
+            if not kernel.GetProcessHandleCount(
+                kernel.GetCurrentProcess(), ctypes.byref(value)
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return value.value
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            before = count()
+            for _ in range(32):
+                with app._windows_namespace_handles(root / "input.json", trusted=True):
+                    pass
+            self.assertLessEqual(count(), before + 2)
 
     def test_auxiliary_symlink_target_untouched(self):
         with tempfile.TemporaryDirectory() as directory:
