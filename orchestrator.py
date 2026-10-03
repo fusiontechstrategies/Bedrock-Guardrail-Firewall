@@ -5570,7 +5570,6 @@ class BedrockGuardrailSystem:
                 self.behavior.record(
                     ctx.subject_id, ctx.enforced_action, ctx.risk_level, ctx.detections
                 )
-                self.metrics.record(ctx.enforced_action, ctx.risk_level, ctx.detections)
             except (StorageError, TypeError, ValueError):
                 ctx.diagnostics.append("noncritical_state_update_failed")
 
@@ -5602,6 +5601,14 @@ class BedrockGuardrailSystem:
                 ctx.recommended_action = GuardrailAction.BLOCK
                 if self.config.enforcement_mode == "enforce":
                     ctx.enforced_action = GuardrailAction.BLOCK
+
+            # Outcome counters follow the final audit-delivery verdict. Metrics
+            # remain noncritical and are recorded once, only for recorded calls.
+            try:
+                self.metrics.record(ctx.enforced_action, ctx.risk_level, ctx.detections)
+            except (StorageError, TypeError, ValueError):
+                if "noncritical_state_update_failed" not in ctx.diagnostics:
+                    ctx.diagnostics.append("noncritical_state_update_failed")
 
         public_audit = {
             "status": audit_status.get("status", "unknown"),
@@ -5785,11 +5792,11 @@ def default_policy_template() -> dict[str, Any]:
             "internal account reference",
         ],
         "prompt_attack_patterns": [
-            r"ignore\s+(?:all\s+)?(?:prior|previous)\s+instructions",
-            r"reveal\s+(?:the\s+)?(?:hidden\s+)?system\s+prompt",
-            r"print\s+(?:all\s+)?(?:environment\s+variables|secrets)",
-            r"bypass\s+(?:the\s+)?(?:guardrail|policy|safety)",
-            r"pretend\s+to\s+be\s+(?:an?\s+)?(?:administrator|root|system)",
+            r"ignore\s{1,64}(?:all\s{1,64})?(?:prior|previous)\s{1,64}instructions",
+            r"reveal\s{1,64}(?:the\s{1,64})?(?:hidden\s{1,64})?system\s{1,64}prompt",
+            r"print\s{1,64}(?:all\s{1,64})?(?:environment\s{1,64}variables|secrets)",
+            r"bypass\s{1,64}(?:the\s{1,64})?(?:guardrail|policy|safety)",
+            r"pretend\s{1,64}to\s{1,64}be\s{1,64}(?:an?\s{1,64})?(?:administrator|root|system)",
         ],
         "presidio_entities": [
             "CREDIT_CARD",
