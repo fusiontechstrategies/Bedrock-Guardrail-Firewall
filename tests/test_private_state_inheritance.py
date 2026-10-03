@@ -268,17 +268,16 @@ class PrivateStateInheritanceTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows final namespace metadata control")
     def test_windows_final_namespace_does_not_use_traversal_admission(self):
         with PrivateTemporaryDirectory(prefix="private-root-positive-") as directory:
-            original = app._open_private_key
-            final = []
-
-            def record(candidate, **kwargs):
-                if Path(candidate) == Path(directory) and not kwargs["create"]:
-                    final.append(kwargs.get("trusted_parent"))
-                return original(candidate, **kwargs)
-
             with (
-                patch.object(app, "_open_private_key", side_effect=record),
+                patch.object(
+                    app, "_open_private_key", wraps=app._open_private_key
+                ) as private_key,
                 app._auxiliary_namespace(Path(directory), trusted_parent=True),
             ):
                 pass
+            final = [
+                call.kwargs.get("trusted_parent")
+                for call in private_key.call_args_list
+                if Path(call.args[0]) == Path(directory) and not call.kwargs["create"]
+            ]
             self.assertEqual(final, [False])
