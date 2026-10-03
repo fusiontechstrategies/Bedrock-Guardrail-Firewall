@@ -18,6 +18,13 @@ checks do not exclude a malicious process with the same user identity, a retaine
 historical ACL-editing capability, or an administrator. Later store operations
 reopen the original lexical namespace with their existing guarded file/lock APIs.
 
+The final Windows data directory must have the current user's SID as owner.
+New application directories set that owner in their creation descriptor, even
+under an elevated token whose default directory owner is Administrators. An
+existing Administrators-owned leaf is refused rather than repaired. Offline
+fixtures create a fresh private child and retain their original cleanup parent;
+installed-package controls request a missing private leaf through public startup.
+
 All distribution entry points share pre-parser archive limits: 64 MiB compressed,
 128 MiB raw TAR, 16 MiB per file, 64 MiB total member bodies, 10,000 physical TAR
 headers/ZIP members, 4 MiB ZIP central directory, 64 KiB TAR extension metadata,

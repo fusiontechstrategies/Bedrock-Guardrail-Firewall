@@ -7,9 +7,9 @@ import json
 import os
 import socket
 import sys
-import tempfile
 import threading
 import unittest
+from tests.private_state_fixture import PrivateTemporaryDirectory
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -80,7 +80,7 @@ def base_config(data_dir: Path, **overrides) -> app.RuntimeConfig:
 
 class GuardrailTestCase(unittest.TestCase):
     def make_system(self, **overrides) -> app.BedrockGuardrailSystem:
-        temporary = tempfile.TemporaryDirectory(prefix="guardrail-unit-")
+        temporary = PrivateTemporaryDirectory(prefix="guardrail-unit-")
         self.addCleanup(temporary.cleanup)
         config = base_config(Path(temporary.name), **overrides)
         return app.BedrockGuardrailSystem(config, privacy_key=TEST_KEY)
@@ -88,7 +88,7 @@ class GuardrailTestCase(unittest.TestCase):
     def make_live_system(
         self, client: FakeBedrockClient, **overrides
     ) -> app.BedrockGuardrailSystem:
-        temporary = tempfile.TemporaryDirectory(prefix="guardrail-aws-unit-")
+        temporary = PrivateTemporaryDirectory(prefix="guardrail-aws-unit-")
         self.addCleanup(temporary.cleanup)
         settings = {
             "aws_mode": "live",
@@ -203,7 +203,7 @@ class UtilityTests(unittest.TestCase):
 
 class ConfigurationTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="guardrail-config-")
+        self.temporary = PrivateTemporaryDirectory(prefix="guardrail-config-")
         self.addCleanup(self.temporary.cleanup)
         self.config = base_config(Path(self.temporary.name))
 
@@ -261,7 +261,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(config.max_input_chars, 4096)
 
     def test_direct_one_file_paths_remain_script_relative(self):
-        with tempfile.TemporaryDirectory(prefix="guardrail-working-directory-") as root:
+        with PrivateTemporaryDirectory(prefix="guardrail-working-directory-") as root:
             working_directory = Path(root)
             with (
                 patch.object(app, "RUNNING_AS_PACKAGE", False),
@@ -279,7 +279,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(default_config.data_dir, PROJECT_ROOT / ".guardrail-data")
 
     def test_installed_package_paths_use_packaged_policies_and_local_state(self):
-        with tempfile.TemporaryDirectory(prefix="guardrail-working-directory-") as root:
+        with PrivateTemporaryDirectory(prefix="guardrail-working-directory-") as root:
             working_directory = Path(root)
             with (
                 patch.object(app, "RUNNING_AS_PACKAGE", True),
@@ -291,8 +291,8 @@ class ConfigurationTests(unittest.TestCase):
                     data_dir="state",
                 )
                 default_config = app.RuntimeConfig.from_env()
-        # Path.resolve() can expand a Windows 8.3 alias such as RUNNER~1 to its
-        # long form, so compare the canonical paths rather than their spellings.
+        # Policy inputs retain their canonical-path contract. Data startup keeps
+        # the lexical namespace, including a Windows 8.3 alias such as RUNNER~1.
         resolved_working_directory = working_directory.resolve(strict=False)
         self.assertEqual(
             config.policy_path,
@@ -302,7 +302,9 @@ class ConfigurationTests(unittest.TestCase):
             config.profiles_path,
             resolved_working_directory / "custom-profiles.json",
         )
-        self.assertEqual(config.data_dir, resolved_working_directory / "state")
+        self.assertEqual(
+            config.data_dir, Path(os.path.abspath(working_directory / "state"))
+        )
         self.assertEqual(
             default_config.policy_path, PROJECT_ROOT / "guardrail_policy.json"
         )
@@ -312,7 +314,7 @@ class ConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(
             default_config.data_dir,
-            resolved_working_directory / ".guardrail-data",
+            Path(os.path.abspath(working_directory / ".guardrail-data")),
         )
 
     def test_doctor_fails_when_mode_or_profile_requires_presidio(self):
@@ -562,7 +564,7 @@ class ConfigurationTests(unittest.TestCase):
 
 class PolicyValidationTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="guardrail-policy-")
+        self.temporary = PrivateTemporaryDirectory(prefix="guardrail-policy-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
@@ -968,14 +970,14 @@ class PrivacyAndPolicyTests(GuardrailTestCase):
 
 class PrivacyKeyTests(unittest.TestCase):
     def test_local_key_is_created_and_reused(self):
-        with tempfile.TemporaryDirectory(prefix="guardrail-key-") as directory:
+        with PrivateTemporaryDirectory(prefix="guardrail-key-") as directory:
             first = app.PrivacyKey(Path(directory))
             second = app.PrivacyKey(Path(directory))
             self.assertEqual(first.key, second.key)
             self.assertEqual(first.source, "local_file")
 
     def test_corrupt_local_key_is_rejected(self):
-        with tempfile.TemporaryDirectory(prefix="guardrail-key-") as directory:
+        with PrivateTemporaryDirectory(prefix="guardrail-key-") as directory:
             path = Path(directory) / "privacy.key"
             path.write_text("not base64!", encoding="ascii")
             with self.assertRaises(app.ConfigurationError):
@@ -983,7 +985,7 @@ class PrivacyKeyTests(unittest.TestCase):
 
     def test_short_injected_key_is_rejected(self):
         with (
-            tempfile.TemporaryDirectory(prefix="guardrail-key-") as directory,
+            PrivateTemporaryDirectory(prefix="guardrail-key-") as directory,
             self.assertRaises(app.ConfigurationError),
         ):
             app.PrivacyKey(Path(directory), b"short")
@@ -1002,7 +1004,7 @@ class AwsIntegrationTests(GuardrailTestCase):
         self.assertEqual(client.calls, [])
 
     def test_live_mode_requires_explicit_authorization(self):
-        temporary = tempfile.TemporaryDirectory(prefix="guardrail-live-auth-")
+        temporary = PrivateTemporaryDirectory(prefix="guardrail-live-auth-")
         self.addCleanup(temporary.cleanup)
         config = base_config(
             Path(temporary.name),
@@ -1388,7 +1390,7 @@ class AuditAndStateTests(GuardrailTestCase):
         self.assertEqual(verification["error"], "audit_events_missing")
 
     def test_remote_audit_and_signature_use_injected_clients(self):
-        temporary = tempfile.TemporaryDirectory(prefix="guardrail-remote-audit-")
+        temporary = PrivateTemporaryDirectory(prefix="guardrail-remote-audit-")
         self.addCleanup(temporary.cleanup)
         config = base_config(
             Path(temporary.name),
@@ -1414,7 +1416,7 @@ class AuditAndStateTests(GuardrailTestCase):
         self.assertEqual(s3.calls[0][1]["ObjectLockMode"], "COMPLIANCE")
 
     def test_required_remote_audit_failure_is_reported(self):
-        temporary = tempfile.TemporaryDirectory(prefix="guardrail-remote-fail-")
+        temporary = PrivateTemporaryDirectory(prefix="guardrail-remote-fail-")
         self.addCleanup(temporary.cleanup)
         config = base_config(
             Path(temporary.name),
@@ -1429,7 +1431,7 @@ class AuditAndStateTests(GuardrailTestCase):
         self.assertEqual(status["remote_error"], "TimeoutError")
 
     def test_remote_review_uses_metadata_queue_message(self):
-        temporary = tempfile.TemporaryDirectory(prefix="guardrail-review-")
+        temporary = PrivateTemporaryDirectory(prefix="guardrail-review-")
         self.addCleanup(temporary.cleanup)
         config = base_config(
             Path(temporary.name),
@@ -1475,7 +1477,7 @@ class AuditAndStateTests(GuardrailTestCase):
         self.assertFalse(system.behavior.path.exists())
 
     def test_required_evidence_cannot_be_disabled_per_request(self):
-        temporary = tempfile.TemporaryDirectory(prefix="guardrail-required-record-")
+        temporary = PrivateTemporaryDirectory(prefix="guardrail-required-record-")
         self.addCleanup(temporary.cleanup)
         config = base_config(
             Path(temporary.name),
@@ -1679,7 +1681,7 @@ class LambdaTests(GuardrailTestCase):
 
 class CommandLineTests(unittest.TestCase):
     def run_main(self, arguments):
-        temporary = tempfile.TemporaryDirectory(prefix="guardrail-cli-")
+        temporary = PrivateTemporaryDirectory(prefix="guardrail-cli-")
         self.addCleanup(temporary.cleanup)
         common = [
             "--policy",

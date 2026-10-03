@@ -7,9 +7,9 @@ import os
 import subprocess
 import sys
 import tarfile
-import tempfile
 import time
 import unittest
+from tests.private_state_fixture import PrivateTemporaryDirectory
 from types import SimpleNamespace
 from dataclasses import replace
 from pathlib import Path
@@ -197,7 +197,7 @@ class CompletePrivateKeyTests(GuardrailTestCase):
 
 class BoundedJsonTests(unittest.TestCase):
     def test_limit_and_utf8_duplicate_depth_semantics(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             path = Path(directory) / "input.json"
             path.write_bytes(b'{"a":1}')
             self.assertEqual(app._load_json_file(path, maximum_bytes=7), {"a": 1})
@@ -209,7 +209,7 @@ class BoundedJsonTests(unittest.TestCase):
                     app._load_json_file(path)
 
     def test_growth_after_fstat_consumes_at_most_limit_plus_one(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             path = Path(directory) / "growing.json"
             path.write_bytes(b" " * 100000)
             real_fstat = os.fstat
@@ -258,7 +258,7 @@ class BoundedJsonTests(unittest.TestCase):
         if os.name == "nt":
             # The Windows descriptor also denies delete sharing, preventing this swap.
             return
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             path = Path(directory) / "input.json"
             path.write_bytes(b'{"old":true}')
             opener = app._open_json_read
@@ -274,7 +274,7 @@ class BoundedJsonTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX relative descriptor traversal regression")
     def test_intermediate_link_swap_after_lstat_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             namespace, alternate = root / "namespace", root / "alternate"
             namespace.mkdir()
@@ -296,7 +296,7 @@ class BoundedJsonTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows reparse traversal regression")
     def test_windows_intermediate_link_swap_after_lstat_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             namespace, alternate = root / "namespace", root / "alternate"
             namespace.mkdir()
@@ -323,7 +323,7 @@ class BoundedJsonTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows namespace pin regression")
     def test_windows_parent_replacement_cannot_redirect_relative_read(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             namespace = root / "namespace"
             namespace.mkdir()
@@ -357,7 +357,7 @@ class BoundedJsonTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX FIFO regression")
     def test_fifo_is_rejected_without_waiting_for_a_writer(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             path = Path(directory) / "pipe"
             os.mkfifo(path)
             start = time.monotonic()
@@ -366,7 +366,7 @@ class BoundedJsonTests(unittest.TestCase):
             self.assertLess(time.monotonic() - start, 1)
 
     def test_json_symlink_and_directory_fail_closed(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "target.json"
             target.write_text("{}")
@@ -423,7 +423,7 @@ class UnicodeRegexTests(unittest.TestCase):
 
 class AuxiliaryFileTests(GuardrailTestCase):
     def test_hardlinks_and_existing_probe_are_never_written(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "untouched"
             target.write_bytes(b"unchanged")
@@ -475,7 +475,7 @@ class AuxiliaryFileTests(GuardrailTestCase):
                 raise ctypes.WinError(ctypes.get_last_error())
             return value.value
 
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             before = count()
             for _ in range(32):
@@ -484,7 +484,7 @@ class AuxiliaryFileTests(GuardrailTestCase):
             self.assertLessEqual(count(), before + 2)
 
     def test_auxiliary_symlink_target_untouched(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             locks = root / "locks"
             fd = app._open_private_key(locks, create=True, directory=True)
@@ -504,7 +504,7 @@ class AuxiliaryFileTests(GuardrailTestCase):
             self.assertEqual(target.read_bytes(), b"unchanged")
 
     def test_cross_process_lock_preserves_mutual_exclusion(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             lock = root / "locks" / "state.lock"
             marker = root / "acquired"
@@ -534,7 +534,7 @@ class AuxiliaryFileTests(GuardrailTestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX ancestor namespace regression")
     def test_world_writable_nonsticky_ancestor_rejected_before_dispatch(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             ancestor = root / "ancestor"
             ancestor.mkdir()
@@ -552,7 +552,7 @@ class AuxiliaryFileTests(GuardrailTestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX root-relative lock namespace regression")
     def test_root_rename_during_child_open_does_not_select_another_namespace(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "data"
             data.mkdir(mode=0o700)
@@ -581,7 +581,7 @@ class AuxiliaryFileTests(GuardrailTestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows synthetic namespace ACL regression")
     def test_other_principal_writable_parent_rejected_before_lock_write(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             result = subprocess.run(
                 ["icacls", str(root), "/grant", "*S-1-1-0:(OI)(CI)F"],
@@ -598,7 +598,7 @@ class AuxiliaryFileTests(GuardrailTestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX owner/mode regression")
     def test_unsafe_parent_modes_and_fifo_locks_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             locks = root / "locks"
             locks.mkdir(mode=0o700)
@@ -682,7 +682,7 @@ class CompleteSdistTests(unittest.TestCase):
             "bedrock_guardrail_firewall.egg-info/requires.txt",
             "bedrock_guardrail_firewall.egg-info/entry_points.txt",
         ):
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(name=name), PrivateTemporaryDirectory() as directory:
                 root = Path(directory)
                 archive = self.fixture(root)
                 release.validate_sdist(archive, VERSION, root)
@@ -696,7 +696,7 @@ class CompleteSdistTests(unittest.TestCase):
             ("bedrock_guardrail_firewall.egg-info/PKG-INFO", True, False),
             ("nothing", False, True),
         ):
-            with tempfile.TemporaryDirectory() as directory:
+            with PrivateTemporaryDirectory() as directory:
                 root = Path(directory)
                 archive = self.fixture(root)
                 self.change(archive, selected, remove=remove, add=add)
@@ -707,7 +707,7 @@ class CompleteSdistTests(unittest.TestCase):
         import gzip
 
         for mode in ("pax", "concatenated", "trailing_tar", "comment"):
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(mode=mode), PrivateTemporaryDirectory() as directory:
                 root = Path(directory)
                 archive_path = self.fixture(root)
                 if mode == "pax":
@@ -747,7 +747,7 @@ class CompleteSdistTests(unittest.TestCase):
             ("directory_mode", 0o777),
             ("pax_headers", {"mtime": "1.5"}),
         ):
-            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(field=field), PrivateTemporaryDirectory() as directory:
                 root = Path(directory)
                 path = self.fixture(root)
                 release.validate_sdist(path, VERSION, root)
@@ -778,7 +778,7 @@ class CompleteSdistTests(unittest.TestCase):
         for boundary in ("wheel", "sdist"):
             with (
                 self.subTest(boundary=boundary),
-                tempfile.TemporaryDirectory() as directory,
+                PrivateTemporaryDirectory() as directory,
             ):
                 root = Path(directory)
                 archive_path = self.fixture(root)
@@ -811,7 +811,7 @@ class CompleteSdistTests(unittest.TestCase):
                 self.assertFalse((root / "evidence").exists())
 
     def test_manifest_cannot_execute_or_import_build_hooks(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with PrivateTemporaryDirectory() as directory:
             root = Path(directory)
             archive = self.fixture(root)
             (root / "MANIFEST.in").write_text("global-include *\n")

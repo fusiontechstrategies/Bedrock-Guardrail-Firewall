@@ -76,7 +76,7 @@ def make_config(runtime, package_root, data_dir: Path, **overrides):
         "profiles_path": Path(
             str(package_root.joinpath("guardrail_policy_profiles.json"))
         ),
-        "data_dir": data_dir,
+        "data_dir": data_dir / "private-state",
         "profile_name": "offline_test",
         "presidio_mode": "disabled",
         "aws_mode": "disabled",
