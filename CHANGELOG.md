@@ -11,6 +11,14 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 - Recognize compact JWT/JOSE credentials structurally, including signed headers with JSON whitespace, before input, output, or retrieval content reaches cloud evaluation. This detects sensitive content; it does not authenticate tokens. Oversized compact candidates fail closed before decoding.
 - Reject whitespace or case collisions in normalized policy identifiers before enforcement or digest acceptance. Existing valid policy digests remain unchanged.
 
+- Redact complete PEM private-key blocks under explicit SANITIZE policies; unknown, incomplete, nested, oversized, or explicitly allowed private keys fail closed.
+- Authenticate every source-distribution source member and static generated metadata against the reviewed source, without importing build hooks.
+- Bound shared JSON reads to one no-follow regular-file descriptor and a maximum-byte budget, with component-relative traversal on POSIX and Windows.
+- Bind release validation and checksums to the same immutable artifact snapshots; reject unreviewed archive extensions and hidden trailing streams.
+- Block premature or orphan private-key footers and reject unsupported regex syntax instead of bypassing complexity validation.
+- Validate competing policy regex atoms with Python's actual Unicode case-insensitive matching semantics, rejecting ambiguous scoped flags.
+- Protect local lock namespaces and random diagnostic probes before writing, rejecting links, unsafe owners, and other-principal mutation permissions.
+
 ## [4.1.1] - 2026-09-29
 
 ### Changed

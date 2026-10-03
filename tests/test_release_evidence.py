@@ -115,6 +115,11 @@ class ReleaseEvidenceTests(unittest.TestCase):
         (root / "scripts").mkdir()
         (root / "pyproject.toml").write_text(
             f'[project]\nname = "bedrock-guardrail-firewall"\nversion = "{VERSION}"\n'
+            'readme = "README.md"\nlicense = "Apache-2.0"\nlicense-files = []\n'
+            'requires-python = ">=3.10"\n'
+            "[project.scripts]\n"
+            "bedrock-guardrail-firewall = "
+            '"bedrock_guardrail_firewall.orchestrator:main"\n'
             "[project.optional-dependencies]\n"
             'aws = ["boto3==1.43.82", "botocore==1.43.82"]\n'
             "presidio = [\"presidio-analyzer==2.2.364; python_version < '3.14'\", "
@@ -150,6 +155,13 @@ class ReleaseEvidenceTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+        (root / "MANIFEST.in").write_text(
+            "include README.md CHANGELOG.md guardrail_policy.json "
+            "guardrail_policy_profiles.json py.typed requirements*.txt\n"
+            "recursive-include scripts *.py\n"
+        )
+        (root / "README.md").write_bytes(b"Synthetic package description.\n")
+
     def make_distributions(self, dist: Path) -> None:
         dist.mkdir()
         wheel = dist / f"bedrock_guardrail_firewall-{VERSION}-py3-none-any.whl"
@@ -182,25 +194,18 @@ class ReleaseEvidenceTests(unittest.TestCase):
         sdist = dist / f"bedrock_guardrail_firewall-{VERSION}.tar.gz"
         with tarfile.open(sdist, mode="w:gz") as archive:
             root = f"bedrock_guardrail_firewall-{VERSION}"
-            source_files = [
-                (name, (dist.parent / name).read_bytes())
-                for name in (
-                    "__init__.py",
-                    "orchestrator.py",
-                    "guardrail_policy.json",
-                    "guardrail_policy_profiles.json",
-                    "py.typed",
-                    "pyproject.toml",
-                )
-            ]
-            for name, value in [
-                ("PKG-INFO", METADATA),
-                ("README.md", b"synthetic"),
-                *source_files,
-            ]:
+            sources = release.reviewed_sdist_sources(dist.parent)
+            expected = {
+                **sources,
+                **release.generated_sdist_members(dist.parent, sources),
+            }
+            for name, value in expected.items():
                 member = tarfile.TarInfo(f"{root}/{name}")
                 member.size = len(value)
                 archive.addfile(member, io.BytesIO(value))
+        from scripts.normalize_sdist import normalize_sdist
+
+        normalize_sdist(sdist, 0)
 
     def test_valid_artifacts_create_covered_evidence(self):
         with tempfile.TemporaryDirectory() as directory:

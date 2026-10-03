@@ -119,6 +119,7 @@ jobs:
       - name: Build and validate distributions
         run: |
           python -m build
+          python scripts/normalize_sdist.py --source-date-epoch "$(git log -1 --format=%ct)" dist/*.tar.gz
           python -m twine check dist/*
 
       - name: Verify distributions with isolated pinned release parsers
@@ -180,6 +181,8 @@ jobs:
           from pathlib import Path
           from scripts.prepare_release_evidence import validate_sdist
           archive = next(Path("dist").glob("*.tar.gz")).resolve()
+          from scripts.normalize_sdist import normalize_sdist
+          normalize_sdist(archive, 0)
           validate_sdist(archive, "4.1.1", Path.cwd())
           subprocess.run([sys.executable, "-m", "pip", "install", "--no-index", "--no-deps", "--no-build-isolation", str(archive)], check=True)
           root = Path.cwd()

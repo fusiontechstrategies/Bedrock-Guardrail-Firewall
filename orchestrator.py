@@ -445,17 +445,254 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _open_posix_components(
+    path: Path, *, directory: bool = False, trusted_ancestors: bool = False
+) -> int:
+    absolute = Path(os.path.abspath(path))
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(absolute.anchor, flags | os.O_DIRECTORY)
+    try:
+        parts = absolute.parts[1:]
+        for index, part in enumerate(parts):
+            if trusted_ancestors:
+                info = os.fstat(fd)
+                if info.st_uid not in {0, os.getuid()} or (
+                    info.st_mode & 0o022
+                    and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX)
+                ):
+                    raise StorageError("Local state ancestor namespace is unsafe")
+            is_directory = index < len(parts) - 1 or directory
+            next_fd = os.open(
+                part, flags | (os.O_DIRECTORY if is_directory else 0), dir_fd=fd
+            )
+            os.close(fd)
+            fd = next_fd
+        result, fd = fd, None
+        return result
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _windows_relative_open(
+    name: str,
+    root_handle: int,
+    *,
+    directory: bool,
+    create: bool = False,
+    descriptor: Any = None,
+    writable: bool = False,
+) -> int:
+    import ctypes
+    import ctypes.wintypes as wintypes
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.USHORT),
+            ("maximum", wintypes.USHORT),
+            ("buffer", wintypes.LPWSTR),
+        ]
+
+    class Attributes(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.ULONG),
+            ("root", wintypes.HANDLE),
+            ("name", ctypes.POINTER(UnicodeString)),
+            ("flags", wintypes.ULONG),
+            ("descriptor", ctypes.c_void_p),
+            ("qos", ctypes.c_void_p),
+        ]
+
+    class Status(ctypes.Structure):
+        _fields_ = [("status", ctypes.c_void_p), ("information", ctypes.c_size_t)]
+
+    require_component = name not in {"", ".", ".."} and not any(
+        character in name for character in "\\/:\0"
+    )
+    if not require_component:
+        raise ConfigurationError("Invalid local filename component")
+    buffer = ctypes.create_unicode_buffer(name)
+    length = len(name.encode("utf-16-le"))
+    unicode = UnicodeString(length, length + 2, ctypes.cast(buffer, wintypes.LPWSTR))
+    attributes = Attributes(
+        ctypes.sizeof(Attributes),
+        root_handle,
+        ctypes.pointer(unicode),
+        0x40,
+        descriptor,
+        None,
+    )
+    io_status, handle = Status(), wintypes.HANDLE()
+    native = ctypes.WinDLL("ntdll")
+    native.NtCreateFile.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(Attributes),
+        ctypes.POINTER(Status),
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    native.NtCreateFile.restype = ctypes.c_long
+    native.RtlNtStatusToDosError.argtypes = [wintypes.DWORD]
+    native.RtlNtStatusToDosError.restype = wintypes.DWORD
+    access = 0x001201BF if writable else (0x001200A0 if directory else 0x00120089)
+    result = native.NtCreateFile(
+        ctypes.byref(handle),
+        access,
+        ctypes.byref(attributes),
+        ctypes.byref(io_status),
+        None,
+        0x10 if directory else 0x80,
+        3,
+        2 if create else 1,
+        0x00200020 | (1 if directory else 0x40),
+        None,
+        0,
+    )
+    if result < 0:
+        error = native.RtlNtStatusToDosError(result & 0xFFFFFFFF)
+        if create and error in {80, 183}:
+            raise FileExistsError(name)
+        raise ctypes.WinError(error)
+    return handle.value
+
+
+@contextlib.contextmanager
+def _windows_namespace_handles(path: Path, *, trusted: bool = False):
+    """Traverse by directory handles, rejecting every reparse component."""
+    import ctypes
+    import ctypes.wintypes as wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+
+    class AttributeTag(ctypes.Structure):
+        _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
+
+    absolute = Path(os.path.abspath(path))
+    handles = []
+    try:
+        root = kernel.CreateFileW(
+            absolute.anchor, 0x001200A0, 3, None, 3, 0x02200000, None
+        )
+        if root == wintypes.HANDLE(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        handles.append(root)
+        if trusted:
+            # Only an actual immutable local volume root receives this exception;
+            # ordinary directories and network shares must pass namespace ACLs.
+            kernel.GetFinalPathNameByHandleW.argtypes = [
+                wintypes.HANDLE,
+                wintypes.LPWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+            ]
+            name = ctypes.create_unicode_buffer(32768)
+            size = kernel.GetFinalPathNameByHandleW(root, name, len(name), 1)
+            if (
+                not size
+                or size >= len(name)
+                or re.fullmatch(r"\\\\\?\\Volume\{[0-9a-fA-F-]{36}\}\\", name.value)
+                is None
+            ):
+                raise ConfigurationError(
+                    "Auxiliary state requires a local volume namespace"
+                )
+        for component in absolute.parts[1:-1]:
+            handles.append(
+                _windows_relative_open(component, handles[-1], directory=True)
+            )
+        for index, handle in enumerate(handles):
+            attributes = AttributeTag()
+            if not kernel.GetFileInformationByHandleEx(
+                handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if attributes.attributes & 0x400 or not attributes.attributes & 0x10:
+                raise ConfigurationError("Local input namespace uses a reparse point")
+            if trusted and index:
+                _open_private_key(
+                    Path("namespace"),
+                    create=False,
+                    directory=True,
+                    trusted_parent=True,
+                    trusted_ancestor=True,
+                    existing_handle=handle,
+                )
+        yield handles[-1]
+    finally:
+        for handle in reversed(handles):
+            kernel.CloseHandle(handle)
+
+
+def _open_json_read(path: Path) -> int:
+    if os.name != "nt":
+        return _open_posix_components(path)
+    import ctypes
+    import ctypes.wintypes as wintypes
+    import msvcrt
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    with _windows_namespace_handles(path) as parent_handle:
+        handle = _windows_relative_open(Path(path).name, parent_handle, directory=False)
+        try:
+            fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+            handle = None
+            return fd
+        finally:
+            if handle is not None:
+                kernel.CloseHandle(handle)
+
+
 def _load_json_file(path: Path, *, maximum_bytes: int = MAX_POLICY_BYTES) -> Any:
     try:
-        size = path.stat().st_size
-    except OSError as exc:
-        raise ConfigurationError(f"Unable to inspect JSON file: {path.name}") from exc
-    if size > maximum_bytes:
-        raise ConfigurationError(
-            f"JSON file exceeds {maximum_bytes} bytes: {path.name}"
-        )
-    try:
-        raw = path.read_text(encoding="utf-8")
+        _reject_path_links(path)
+        fd = _open_json_read(path)
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or (
+                getattr(info, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            ):
+                raise ConfigurationError("JSON input must be a regular, unlinked file")
+            if info.st_size > maximum_bytes:
+                raise ConfigurationError(f"JSON file exceeds {maximum_bytes} bytes")
+            value_bytes = handle.read(maximum_bytes + 1)
+            if len(value_bytes) > maximum_bytes:
+                raise ConfigurationError(f"JSON file exceeds {maximum_bytes} bytes")
+            raw = value_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ConfigurationError(f"JSON file must be UTF-8: {path.name}") from exc
     except OSError as exc:
@@ -473,13 +710,130 @@ def _load_json_file(path: Path, *, maximum_bytes: int = MAX_POLICY_BYTES) -> Any
     return value
 
 
-def _write_restricted(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _duplicate_windows_directory(handle: int) -> int:
+    import ctypes
+    import ctypes.wintypes as wintypes
+    import msvcrt
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.DuplicateHandle.argtypes = [
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    duplicate = wintypes.HANDLE()
+    process = kernel.GetCurrentProcess()
+    if not kernel.DuplicateHandle(
+        process, handle, process, ctypes.byref(duplicate), 0, False, 2
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
     try:
-        path.write_bytes(data)
-        with contextlib.suppress(OSError):
-            path.chmod(0o600)
-    except OSError as exc:
+        return msvcrt.open_osfhandle(duplicate.value, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel.CloseHandle(duplicate)
+        raise
+
+
+@contextlib.contextmanager
+def _auxiliary_namespace(parent: Path):
+    """Pin the trusted namespace while opening owner-only auxiliary files."""
+    _reject_path_links(parent)
+    namespace = (
+        _windows_namespace_handles(parent, trusted=True)
+        if os.name == "nt"
+        else contextlib.nullcontext()
+    )
+    namespace_handle = namespace.__enter__()
+    try:
+        root_fd = (
+            _duplicate_windows_directory(namespace_handle)
+            if os.name == "nt"
+            else _open_posix_components(
+                parent.parent, directory=True, trusted_ancestors=True
+            )
+        )
+    except BaseException:
+        namespace.__exit__(None, None, None)
+        raise
+    parent_fd = None
+    try:
+        root_info = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or (
+                getattr(root_info, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            )
+            or (
+                os.name != "nt"
+                and (root_info.st_uid != os.getuid() or root_info.st_mode & 0o022)
+            )
+        ):
+            raise StorageError("Local state namespace owner or permissions are unsafe")
+        try:
+            parent_fd = _open_private_key(
+                parent,
+                create=True,
+                directory=True,
+                parent_fd=root_fd,
+            )
+        except FileExistsError:
+            parent_fd = _open_private_key(
+                parent,
+                create=False,
+                directory=True,
+                parent_fd=root_fd,
+            )
+        info = os.fstat(parent_fd)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or (
+                getattr(info, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            )
+            or (
+                os.name != "nt" and (info.st_uid != os.getuid() or info.st_mode & 0o077)
+            )
+        ):
+            raise StorageError("Auxiliary namespace must be owner-only and unlinked")
+        yield parent_fd
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+        os.close(root_fd)
+        namespace.__exit__(None, None, None)
+
+
+def _validate_auxiliary_descriptor(fd: int) -> None:
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or (
+            getattr(info, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        )
+        or (os.name != "nt" and (info.st_uid != os.getuid() or info.st_mode & 0o077))
+    ):
+        raise StorageError("Auxiliary state must be a single owner-only regular file")
+
+
+def _write_restricted(path: Path, data: bytes) -> None:
+    try:
+        with _auxiliary_namespace(path.parent) as parent_fd:
+            fd = _open_private_key(path, create=True, parent_fd=parent_fd)
+            with os.fdopen(fd, "wb") as handle:
+                _validate_auxiliary_descriptor(handle.fileno())
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+    except (ConfigurationError, OSError) as exc:
         raise StorageError(f"Unable to write {path.name}") from exc
 
 
@@ -490,11 +844,24 @@ class CrossProcessFileLock:
         self.path = path
         self.timeout = timeout
         self._handle: Any = None
+        self._namespace: Any = None
 
     def __enter__(self) -> CrossProcessFileLock:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._handle = self.path.open("a+b")
+            self._namespace = _auxiliary_namespace(self.path.parent)
+            parent_fd = self._namespace.__enter__()
+            kwargs = {"parent_fd": parent_fd}
+            try:
+                fd = _open_private_key(self.path, create=True, **kwargs)
+            except FileExistsError:
+                fd = _open_private_key(self.path, create=False, **kwargs)
+            try:
+                _validate_auxiliary_descriptor(fd)
+                self._handle = os.fdopen(fd, "r+b")
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raise
             self._handle.seek(0, os.SEEK_END)
             if self._handle.tell() == 0:
                 self._handle.write(b"0")
@@ -514,6 +881,9 @@ class CrossProcessFileLock:
             if self._handle is not None:
                 self._handle.close()
                 self._handle = None
+            if self._namespace is not None:
+                self._namespace.__exit__(None, None, None)
+                self._namespace = None
             raise
 
     def _lock(self) -> None:
@@ -547,6 +917,9 @@ class CrossProcessFileLock:
             if self._handle is not None:
                 self._handle.close()
                 self._handle = None
+            if self._namespace is not None:
+                self._namespace.__exit__(None, None, None)
+                self._namespace = None
 
 
 def _atomic_json_write(path: Path, value: Any, *, create_only: bool = False) -> None:
@@ -924,44 +1297,63 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
         except AttributeError:  # Python 3.10 keeps the parser in its legacy module.
             import sre_parse as _parser
 
-        def matches_literal(atom, codepoint):
+        atom_cache = {}
+
+        def atom_pattern(atom):
             op, value = atom
-            character = chr(codepoint)
             if op == _parser.LITERAL:
-                return chr(value).casefold() == character.casefold()
+                return re.escape(chr(value))
             if op == _parser.NOT_LITERAL:
-                return chr(value).casefold() != character.casefold()
+                return "[^" + re.escape(chr(value)) + "]"
             if op == _parser.ANY:
-                return True
-            if op == _parser.IN:
-                if any(item[0] == _parser.NEGATE for item in value):
-                    return True
-                return any(matches_literal(item, codepoint) for item in value)
+                return "."
             if op == _parser.RANGE:
-                return any(
-                    len(form) == 1 and value[0] <= ord(form) <= value[1]
-                    for form in (character, character.lower(), character.upper())
-                )
+                return re.escape(chr(value[0])) + "-" + re.escape(chr(value[1]))
             if op == _parser.CATEGORY:
-                category = str(value)
-                if category == "CATEGORY_SPACE":
-                    return character.isspace()
-                if category == "CATEGORY_DIGIT":
-                    return character.isdecimal()
-                if category == "CATEGORY_WORD":
-                    return character.isalnum() or character == "_"
-            return True
+                return {
+                    "CATEGORY_SPACE": r"\s",
+                    "CATEGORY_NOT_SPACE": r"\S",
+                    "CATEGORY_DIGIT": r"\d",
+                    "CATEGORY_NOT_DIGIT": r"\D",
+                    "CATEGORY_WORD": r"\w",
+                    "CATEGORY_NOT_WORD": r"\W",
+                }.get(str(value))
+            if op == _parser.IN:
+                pieces = []
+                for item in value:
+                    if item[0] == _parser.NEGATE:
+                        pieces.append("^")
+                    else:
+                        piece = atom_pattern(item)
+                        if piece is None:
+                            return None
+                        pieces.append(piece)
+                return "[" + "".join(pieces) + "]"
+            return None
+
+        def matches_literal(atom, codepoint):
+            # Use Python's actual IGNORECASE semantics, including dotless I,
+            # capital dotted I, long s, and Kelvin sign, instead of casefold.
+            key = repr(atom)
+            if key not in atom_cache:
+                expression = atom_pattern(atom)
+                atom_cache[key] = (
+                    re.compile(expression, compiled.flags) if expression else None
+                )
+            matcher = atom_cache[key]
+            return matcher is None or matcher.fullmatch(chr(codepoint)) is not None
 
         def finite_literals(atom):
             op, value = atom
-            if op == _parser.LITERAL:
+            if op == _parser.LITERAL and value < 128:
                 return {value}
-            if op == _parser.RANGE and value[1] - value[0] <= 256:
+            if op == _parser.RANGE and value[1] < 128:
                 return set(range(value[0], value[1] + 1))
             if op == _parser.IN:
                 values = [finite_literals(item) for item in value]
                 if all(item is not None for item in values):
                     return set().union(*values)
+            # Unknown or non-ASCII equivalence sets conservatively overlap.
             return None
 
         def overlaps(left, right):
@@ -1030,6 +1422,10 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
                         child_end = walk(child, pending)
                         pending = child_end
                 elif op == _parser.SUBPATTERN:
+                    if value[1] or value[2]:
+                        raise ConfigurationError(
+                            f"{field_name} contains unsupported scoped regex flags"
+                        )
                     pending = walk(value[-1], pending)
                 elif op == _parser.BRANCH:
                     alternative_budget *= len(value[1])
@@ -1042,9 +1438,15 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
                     ]
                 elif op == _parser.LITERAL:
                     pending = [atom for atom in pending if matches_literal(atom, value)]
-                elif str(op) in {"ASSERT", "ASSERT_NOT", "GROUPREF", "GROUPREF_EXISTS"}:
+                elif op not in {
+                    _parser.AT,
+                    _parser.IN,
+                    _parser.NOT_LITERAL,
+                    _parser.CATEGORY,
+                    _parser.ANY,
+                }:
                     raise ConfigurationError(
-                        f"{field_name} contains an unsupported assertion or reference"
+                        f"{field_name} contains an unsupported regex operation"
                     )
                 pending = list({repr(atom): atom for atom in pending}.values())
             return pending
@@ -1431,12 +1833,35 @@ class EvaluationContext:
     subject_id: str = "anonymous"
 
 
-def _open_private_key(path: Path, *, create: bool) -> int:
+def _open_private_key(
+    path: Path,
+    *,
+    create: bool,
+    directory: bool = False,
+    trusted_parent: bool = False,
+    parent_fd: int | None = None,
+    existing_handle: int | None = None,
+    trusted_ancestor: bool = False,
+) -> int:
     if os.name != "nt":
-        flags = os.O_RDWR | os.O_NOFOLLOW
+        if directory:
+            if create:
+                os.mkdir(
+                    path.name if parent_fd is not None else path,
+                    mode=0o700,
+                    dir_fd=parent_fd,
+                )
+            return os.open(
+                path.name if parent_fd is not None else path,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY,
+                dir_fd=parent_fd,
+            )
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
         if create:
             flags |= os.O_CREAT | os.O_EXCL
-        return os.open(path, flags, 0o600)
+        return os.open(
+            path.name if parent_fd is not None else path, flags, 0o600, dir_fd=parent_fd
+        )
     # Protect the key before its first byte is written. Validate the descriptor
     # of the opened handle, not a path that another process could replace.
     import ctypes
@@ -1489,7 +1914,7 @@ def _open_private_key(path: Path, *, create: bool) -> int:
         kernel.CloseHandle(token)
     if not sid or not re.fullmatch(r"S-1-(?:\d+-)*\d+", sid):
         raise ConfigurationError("Unable to establish privacy key owner")
-    expected = f"O:{sid}D:P(A;;FA;;;{sid})"
+    expected = f"O:{sid}D:P(A;{'OICI' if directory else ''};FA;;;{sid})"
 
     class Attributes(ctypes.Structure):
         _fields_ = [
@@ -1555,15 +1980,37 @@ def _open_private_key(path: Path, *, create: bool) -> int:
         raise ctypes.WinError(ctypes.get_last_error())
     attributes = Attributes(ctypes.sizeof(Attributes), descriptor, False)
     try:
-        handle = kernel.CreateFileW(
-            str(path),
-            0xC0020000,
-            3,
-            ctypes.byref(attributes) if create else None,
-            1 if create else 3,
-            0x00200000,
-            None,
-        )
+        if existing_handle is not None:
+            handle = existing_handle
+        elif parent_fd is not None:
+            handle = _windows_relative_open(
+                path.name,
+                msvcrt.get_osfhandle(parent_fd),
+                directory=directory,
+                create=create,
+                descriptor=descriptor if create else None,
+                writable=True,
+            )
+        else:
+            if directory and create:
+                kernel.CreateDirectoryW.argtypes = [
+                    wintypes.LPCWSTR,
+                    ctypes.POINTER(Attributes),
+                ]
+                if not kernel.CreateDirectoryW(str(path), ctypes.byref(attributes)):
+                    error = ctypes.get_last_error()
+                    if error in {80, 183}:
+                        raise FileExistsError(str(path))
+                    raise ctypes.WinError(error)
+            handle = kernel.CreateFileW(
+                str(path),
+                0xC0020000,
+                3,
+                ctypes.byref(attributes) if create and not directory else None,
+                1 if create and not directory else 3,
+                0x02200000 if directory else 0x00200000,
+                None,
+            )
     finally:
         kernel.LocalFree(descriptor)
     if handle == wintypes.HANDLE(-1).value:
@@ -1593,37 +2040,89 @@ def _open_private_key(path: Path, *, create: bool) -> int:
                 loaded, ctypes.byref(control), ctypes.byref(revision)
             ):
                 raise ctypes.WinError(ctypes.get_last_error())
-            if (
-                not owner
-                or not advapi.EqualSid(owner, owner_sid)
-                or not dacl
-                or not (control.value & 0x1000)
+            owner_text = wintypes.LPWSTR()
+            if not owner or not advapi.ConvertSidToStringSidW(
+                owner, ctypes.byref(owner_text)
             ):
-                raise ConfigurationError("Privacy key owner or protected ACL is unsafe")
+                raise ConfigurationError("Local state owner is unavailable")
+            try:
+                owner_value = owner_text.value
+            finally:
+                kernel.LocalFree(ctypes.cast(owner_text, ctypes.c_void_p))
+            trusted_sids = {
+                sid,
+                "S-1-5-18",
+                "S-1-5-32-544",
+                "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+            }
+            if not dacl or (
+                owner_value not in trusted_sids
+                if trusted_ancestor
+                else owner_value != sid
+            ):
+                raise ConfigurationError("Local state owner or ACL is unsafe")
             header = ctypes.cast(dacl, ctypes.POINTER(AclHeader)).contents
-            if header.count != 1:
-                raise ConfigurationError("Privacy key ACL must grant only its owner")
-            ace = ctypes.c_void_p()
-            if not advapi.GetAce(dacl, 0, ctypes.byref(ace)):
-                raise ctypes.WinError(ctypes.get_last_error())
-            ace_bytes = ctypes.cast(ace, ctypes.POINTER(ctypes.c_ubyte))
-            mask = ctypes.c_uint32.from_address(ace.value + 4).value
-            if (
-                ace_bytes[0] != 0
-                or ace_bytes[1] != 0
-                or mask != 0x001F01FF
-                or not (advapi.EqualSid(ctypes.c_void_p(ace.value + 8), owner_sid))
-            ):
-                raise ConfigurationError(
-                    "Privacy key ACL does not grant owner-only access"
-                )
+            if trusted_parent:
+                # Parent inheritance may include SYSTEM and Administrators. No
+                # other principal may mutate this namespace or its ACL.
+                for index in range(header.count):
+                    ace = ctypes.c_void_p()
+                    if not advapi.GetAce(dacl, index, ctypes.byref(ace)):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    ace_bytes = ctypes.cast(ace, ctypes.POINTER(ctypes.c_ubyte))
+                    if (
+                        ace_bytes[1] & 8
+                    ):  # Inherit-only ACE does not apply to this directory.
+                        continue
+                    if ace_bytes[0] == 1:  # A denial never grants mutation.
+                        continue
+                    if ace_bytes[0] != 0:
+                        raise ConfigurationError("Unsupported local state ACL")
+                    mask = ctypes.c_uint32.from_address(ace.value + 4).value
+                    ace_sid = wintypes.LPWSTR()
+                    if not advapi.ConvertSidToStringSidW(
+                        ctypes.c_void_p(ace.value + 8), ctypes.byref(ace_sid)
+                    ):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    try:
+                        allowed = ace_sid.value in trusted_sids | {"S-1-3-4"}
+                    finally:
+                        kernel.LocalFree(ctypes.cast(ace_sid, ctypes.c_void_p))
+                    if mask & 0x500D0156 and not allowed:
+                        raise ConfigurationError(
+                            "Local state parent is writable by another principal"
+                        )
+            else:
+                if not (control.value & 0x1000) or header.count != 1:
+                    raise ConfigurationError(
+                        "Local state ACL must grant only its owner"
+                    )
+                ace = ctypes.c_void_p()
+                if not advapi.GetAce(dacl, 0, ctypes.byref(ace)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                ace_bytes = ctypes.cast(ace, ctypes.POINTER(ctypes.c_ubyte))
+                mask = ctypes.c_uint32.from_address(ace.value + 4).value
+                if (
+                    ace_bytes[0] != 0
+                    or ace_bytes[1] != (3 if directory else 0)
+                    or mask != 0x001F01FF
+                    or not advapi.EqualSid(ctypes.c_void_p(ace.value + 8), owner_sid)
+                ):
+                    raise ConfigurationError(
+                        "Local state ACL does not grant owner-only access"
+                    )
         finally:
             kernel.LocalFree(loaded)
-        fd = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
+        if existing_handle is not None:
+            handle = None
+            return existing_handle
+        fd = msvcrt.open_osfhandle(
+            handle, (os.O_RDONLY if directory else os.O_RDWR) | os.O_BINARY
+        )
         handle = None
         return fd
     finally:
-        if handle is not None:
+        if handle is not None and existing_handle is None:
             kernel.CloseHandle(handle)
 
 
@@ -1797,7 +2296,10 @@ REGEX_RECOGNIZERS = (
     ),
     RegexRecognizer(
         "PRIVATE_KEY",
-        re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY(?: BLOCK)?-----"),
+        re.compile(
+            r"-----BEGIN (?P<label>(?:[A-Z0-9 ]{1,64} )?PRIVATE KEY(?: BLOCK)?)-----",
+            re.IGNORECASE,
+        ),
         0.99,
     ),
     RegexRecognizer(
@@ -2015,19 +2517,98 @@ class PrivacyEngine:
                         continue
                     validated = True
                 action = self.bundle.entity_actions.get(
-                    recognizer.entity_type, GuardrailAction.SANITIZE
+                    recognizer.entity_type,
+                    GuardrailAction.BLOCK
+                    if recognizer.entity_type == "PRIVATE_KEY"
+                    else GuardrailAction.SANITIZE,
                 )
+                end = match.end()
+                if recognizer.entity_type == "PRIVATE_KEY":
+                    label = match.group("label")
+                    footer = "-----END " + label + "-----"
+                    # Literal bounded search, never a multiline backtracking regex.
+                    end_header = text.find("-----END ", end, end + 16384)
+                    nested = text.find("-----BEGIN ", end, end + 16384)
+                    if (
+                        end_header < 0
+                        or text[end_header : end_header + len(footer)].upper()
+                        != footer.upper()
+                        or (nested >= 0 and nested < end_header)
+                    ):
+                        end = len(text)
+                        action = GuardrailAction.BLOCK
+                    else:
+                        body = text[match.end() : end_header]
+                        try:
+                            decoded = base64.b64decode(
+                                "".join(body.split()), validate=True
+                            )
+                            valid_body = (
+                                bool(decoded)
+                                and re.fullmatch(r"[A-Za-z0-9+/= \t\r\n]+", body)
+                                is not None
+                            )
+                        except (ValueError, UnicodeError):
+                            valid_body = False
+                        end = end_header + len(footer)
+                        continuation = re.match(
+                            r"[A-Za-z0-9+/= \t\r\n]+", text[end : end + 16384]
+                        )
+                        continuation_length = (
+                            len("".join(continuation.group().split()))
+                            if continuation
+                            else 0
+                        )
+                        if (
+                            not valid_body
+                            or action == GuardrailAction.ALLOW
+                            or continuation_length >= 16
+                        ):
+                            # A plausible footerless encoded continuation is
+                            # ambiguous. Never release or send its bytes onward.
+                            action = GuardrailAction.BLOCK
                 findings.append(
                     EntityFinding(
                         entity_type=recognizer.entity_type,
                         start=match.start(),
-                        end=match.end(),
+                        end=end,
                         confidence=recognizer.confidence,
                         recognizer=f"regex:{recognizer.entity_type.lower()}",
                         action=action,
                         checksum_validated=validated,
                     )
                 )
+        covered = sorted(
+            (item.start, item.end)
+            for item in findings
+            if item.entity_type == "PRIVATE_KEY"
+        )
+        index = 0
+        for footer in re.finditer(
+            r"-----END (?:[A-Z0-9 ]{1,64} )?PRIVATE KEY(?: BLOCK)?-----",
+            text,
+            re.IGNORECASE,
+        ):
+            while index < len(covered) and covered[index][1] <= footer.start():
+                index += 1
+            if (
+                index < len(covered)
+                and covered[index][0] <= footer.start()
+                and covered[index][1] >= footer.end()
+            ):
+                continue
+            if len(findings) >= MAX_PRIVACY_FINDINGS:
+                raise InputValidationError("Privacy finding budget exceeded")
+            findings.append(
+                EntityFinding(
+                    entity_type="PRIVATE_KEY",
+                    start=footer.start(),
+                    end=footer.end(),
+                    confidence=0.99,
+                    recognizer="regex:orphan_private_key_footer",
+                    action=GuardrailAction.BLOCK,
+                )
+            )
         return findings
 
     def _presidio_findings(self, text: str) -> list[EntityFinding]:
@@ -4649,11 +5230,13 @@ class BedrockGuardrailSystem:
                 "no AWS calls will be made",
             )
         try:
-            probe = self.config.data_dir / ".write-probe"
+            probe = (
+                self.config.data_dir / "locks" / (".write-probe-" + uuid.uuid4().hex)
+            )
             _write_restricted(probe, b"ok")
             probe.unlink()
             add("data_directory", "pass", "writable")
-        except (StorageError, OSError):
+        except (ConfigurationError, StorageError, OSError):
             add("data_directory", "fail", "not writable")
         return {
             "ready": not any(item["status"] == "fail" for item in checks),

@@ -201,8 +201,8 @@ class SecurityRegressionTests(GuardrailTestCase):
         original = app._open_private_key
         seen = []
 
-        def observe(path, *, create):
-            fd = original(path, create=create)
+        def observe(path, *, create, **kwargs):
+            fd = original(path, create=create, **kwargs)
             if path == system.audit.events_path:
                 info = os.fstat(fd)
                 seen.append((create, info.st_size, info.st_mode & 0o077))
