@@ -1,7 +1,7 @@
 bandit==1.9.4
 -r requirements-verifier.txt
 build==1.6.1
-coverage==7.16.1
+coverage==7.16.2
 pip-audit==2.10.1
-ruff==0.16.9
+ruff==0.16.10
 twine==7.0.0
