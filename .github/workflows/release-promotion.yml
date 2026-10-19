@@ -71,7 +71,7 @@ jobs:
               print('verifier-commit=' + os.environ['VERIFIER_COMMIT'], file=out)
           PY
       - name: Download only the authenticated run's immutable candidate
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           artifact-ids: ${{ steps.identity.outputs.artifact-id }}
           run-id: ${{ github.event.workflow_run.id }}
@@ -149,7 +149,7 @@ jobs:
           python -I -m venv "$RUNNER_TEMP/release-verifier"
           "$RUNNER_TEMP/release-verifier/bin/python" -I -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r verifier/requirements-verifier.lock
       - name: Download the bound immutable producer artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           artifact-ids: ${{ needs.verify.outputs.artifact-id }}
           run-id: ${{ github.event.workflow_run.id }}
@@ -198,7 +198,7 @@ jobs:
           python -I -m venv "$RUNNER_TEMP/release-verifier"
           "$RUNNER_TEMP/release-verifier/bin/python" -I -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r verifier/requirements-verifier.lock
       - name: Download the bound immutable producer artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           artifact-ids: ${{ needs.verify.outputs.artifact-id }}
           run-id: ${{ github.event.workflow_run.id }}
