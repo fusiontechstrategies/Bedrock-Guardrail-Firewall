@@ -49,7 +49,7 @@ statically reconstructed from the reviewed TOML, README, LICENSE and NOTICE.
 The complete METADATA body/headers, WHEEL backend/tag declarations, entry points,
 top-level name, declared license files and exact member set are checked; RECORD
 must cover and hash that set. The supported deterministic backend conventions are
-setuptools 84.0.0 and wheel 0.48.0. Uniform LF/CRLF generated METADATA forms are
+setuptools 84.1.0 and wheel 0.48.0. Uniform LF/CRLF generated METADATA forms are
 explicit platform alternatives; source-controlled bytes are never translated.
 Wheel attributes are explicit platform alternatives: Unix regular files `0644`,
 Windows-built regular files `0666`, and generated RECORD regular files `0664`.

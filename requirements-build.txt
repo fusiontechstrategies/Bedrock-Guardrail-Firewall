@@ -1,6 +1,6 @@
 # Distribution build and validation tools. Keep in dependency-audit scope.
 -r requirements-verifier.txt
 build==1.6.1
-setuptools==84.0.0
+setuptools==84.1.0
 twine==7.0.0
 wheel==0.48.0

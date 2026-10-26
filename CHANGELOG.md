@@ -6,6 +6,10 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- Refresh the paired boto3/botocore AWS integration pins to 1.43.118 and the development Ruff pin to 0.17.2.
+
 ### Fixed
 
 - Generate policy templates with the same bounded prompt-pattern forms as the shipped policy, so generated policy and profile templates pass the normal offline loader.
@@ -14,6 +18,7 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 
 ### Security
 
+- Refresh the reproducible build lock to certifi 2026.10.23 and setuptools 84.1.0, clearing the current build-tool advisories.
 - Require protected owner-only Windows final state namespaces and existing JSON leaves without silently repairing permissions. Create state temporaries, review/incident directories and evidence reservations through the pinned private descriptor helper before writing.
 - Preserve private POSIX state reads and writes below a retained root-owned sticky temporary ancestor; final directories and files still require private ownership and permissions.
 
