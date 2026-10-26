@@ -124,7 +124,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
     def make_source(self, root: Path) -> None:
         (root / "scripts").mkdir()
         (root / "pyproject.toml").write_text(
-            '[build-system]\nrequires = ["setuptools==84.0.0", "wheel==0.48.0"]\n'
+            '[build-system]\nrequires = ["setuptools==84.1.0", "wheel==0.48.0"]\n'
             'build-backend = "setuptools.build_meta"\n'
             f'[project]\nname = "bedrock-guardrail-firewall"\nversion = "{VERSION}"\n'
             'readme = "README.md"\nlicense = "Apache-2.0"\nlicense-files = []\n'
@@ -190,7 +190,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
         }
         wheel_files[f"{dist_info}/METADATA"] = METADATA
         wheel_files[f"{dist_info}/WHEEL"] = (
-            b"Wheel-Version: 1.0\nGenerator: setuptools (84.0.0)\n"
+            b"Wheel-Version: 1.0\nGenerator: setuptools (84.1.0)\n"
             b"Root-Is-Purelib: true\nTag: py3-none-any\n\n"
         )
         wheel_files[f"{dist_info}/top_level.txt"] = b"bedrock_guardrail_firewall\n"
