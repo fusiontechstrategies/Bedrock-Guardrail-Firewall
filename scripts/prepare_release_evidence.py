@@ -853,7 +853,7 @@ def reviewed_wheel_members(source_root: Path, version: str) -> dict[str, set[byt
     require(
         document.get("build-system")
         == {
-            "requires": ["setuptools==84.0.0", "wheel==0.48.0"],
+            "requires": ["setuptools==84.1.0", "wheel==0.48.0"],
             "build-backend": "setuptools.build_meta",
         },
         "Unsupported static wheel backend conventions",
@@ -873,7 +873,7 @@ def reviewed_wheel_members(source_root: Path, version: str) -> dict[str, set[byt
     }
     members[prefix + "METADATA"] = {metadata, metadata.replace(b"\n", b"\r\n")}
     members[prefix + "WHEEL"] = {
-        b"Wheel-Version: 1.0\nGenerator: setuptools (84.0.0)\n"
+        b"Wheel-Version: 1.0\nGenerator: setuptools (84.1.0)\n"
         b"Root-Is-Purelib: true\nTag: py3-none-any\n\n"
     }
     for name in ("entry_points.txt", "top_level.txt"):
