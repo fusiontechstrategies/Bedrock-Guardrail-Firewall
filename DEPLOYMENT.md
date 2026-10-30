@@ -19,8 +19,8 @@ The runtime does not invoke a foundation model. It evaluates supplied input and 
 
 ## Supported runtime
 
-- Core runtime on Python 3.10 through 3.14
-- Pinned Presidio integration on Python 3.10 through 3.13
+- Core runtime on Python 3.12 through 3.14
+- Pinned Presidio integration on Python 3.12 through 3.13
 - Windows and Linux
 - Standard-library-only core
 - Optional `boto3` integration

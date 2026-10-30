@@ -31,7 +31,7 @@ import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -118,7 +118,7 @@ class ExternalServiceError(GuardrailError):
     code = "external_service_error"
 
 
-class GuardrailAction(str, Enum):
+class GuardrailAction(str, Enum):  # noqa: UP042 - preserve public Enum string behavior
     ALLOW = "allow"
     SANITIZE = "sanitize"
     REVIEW = "queue_for_review"
@@ -126,7 +126,7 @@ class GuardrailAction(str, Enum):
     BLOCK = "block"
 
 
-class RiskLevel(str, Enum):
+class RiskLevel(str, Enum):  # noqa: UP042 - preserve public Enum string behavior
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -241,7 +241,7 @@ STOP_WORDS = {
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -1419,7 +1419,7 @@ def _validate_safe_pattern(pattern: str, field_name: str) -> str:
         # nested quantifiers. Limit repetition to one character-class atom.
         try:
             _parser = re._parser
-        except AttributeError:  # Python 3.10 keeps the parser in its legacy module.
+        except AttributeError:  # Older runtimes keep the parser in its legacy module.
             import sre_parse as _parser
 
         atom_cache = {}
@@ -3996,7 +3996,11 @@ class BedrockGuardrailAdapter:
             )
 
 
-def _can_invoke_external(detections: Sequence[Detection]) -> bool:
+def _can_invoke_external(
+    detections: Sequence[Detection], risk_level: RiskLevel | None = None
+) -> bool:
+    if risk_level in {RiskLevel.HIGH, RiskLevel.CRITICAL}:
+        return False
     current = (
         _max_action(*(item.action for item in detections))
         if detections
@@ -5345,8 +5349,9 @@ class BedrockGuardrailSystem:
                 )
             )
 
+        _, local_risk_level = self.risk.score(ctx.detections, behavior_score)
         skip_live_aws = self.config.aws_mode == "live" and not _can_invoke_external(
-            ctx.detections
+            ctx.detections, local_risk_level
         )
         aws_input_action = GuardrailAction.ALLOW
         if skip_live_aws:
@@ -5389,9 +5394,10 @@ class BedrockGuardrailSystem:
                 ctx.diagnostics.append("aws_input_output:rechecked")
 
         if ctx.sanitized_output:
+            _, pre_output_risk_level = self.risk.score(ctx.detections, behavior_score)
             if (
                 self.config.aws_mode == "live"
-                and not _can_invoke_external(ctx.detections)
+                and not _can_invoke_external(ctx.detections, pre_output_risk_level)
             ) or aws_input_action in {
                 GuardrailAction.REVIEW,
                 GuardrailAction.ESCALATE,

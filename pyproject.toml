@@ -7,7 +7,7 @@ name = "bedrock-guardrail-firewall"
 version = "4.1.1"
 description = "Privacy-first policy enforcement for generative AI traffic"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Jeffrey Friedler" }]
@@ -29,8 +29,6 @@ classifiers = [
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
@@ -69,7 +67,7 @@ bedrock_guardrail_firewall = [
 
 [tool.ruff]
 line-length = 88
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["B", "E", "F", "I", "SIM", "UP"]

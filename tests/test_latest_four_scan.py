@@ -426,7 +426,7 @@ class MarkerAndArchiveTests(unittest.TestCase):
             buffer_archive.seek(0)
             with tarfile.open(fileobj=buffer_archive, mode="r") as archive:
                 # This archive has exactly one owned, inert, OS-observed member;
-                # extract that member with the API supported on Python 3.10.
+                # extract that member with the API supported on Python 3.12.
                 archive.extract(alias.name, path.parent)
             self.assertEqual(path.read_bytes(), payload)
 

@@ -19,7 +19,7 @@ METADATA = (
 Name: bedrock-guardrail-firewall
 Version: {VERSION}
 License-Expression: Apache-2.0
-Requires-Python: >=3.10
+Requires-Python: >=3.12
 Description-Content-Type: text/markdown
 Provides-Extra: aws
 Requires-Dist: boto3==1.43.82; extra == "aws"
@@ -128,7 +128,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             'build-backend = "setuptools.build_meta"\n'
             f'[project]\nname = "bedrock-guardrail-firewall"\nversion = "{VERSION}"\n'
             'readme = "README.md"\nlicense = "Apache-2.0"\nlicense-files = []\n'
-            'requires-python = ">=3.10"\n'
+            'requires-python = ">=3.12"\n'
             "[project.scripts]\n"
             "bedrock-guardrail-firewall = "
             '"bedrock_guardrail_firewall.orchestrator:main"\n'

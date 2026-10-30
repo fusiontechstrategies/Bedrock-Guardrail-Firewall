@@ -63,7 +63,7 @@ A focused pull request should:
 - Update policy documentation when the schema changes.
 - Update deployment documentation when configuration changes.
 - Update `CHANGELOG.md` for user-visible changes.
-- Preserve Python 3.10 compatibility.
+- Preserve Python 3.12 compatibility.
 - Avoid credentials, private resource names, raw operational records, and personal data.
 - Keep third-party actions pinned to a reviewed commit hash.
 

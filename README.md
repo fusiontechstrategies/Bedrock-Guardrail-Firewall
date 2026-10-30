@@ -4,7 +4,7 @@ Turn every generative AI request and response into an enforceable security decis
 
 One file. Multiple control planes. Zero implicit cloud calls.
 
-![Python](https://img.shields.io/badge/Python-3.10%20to%203.14-3776AB?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.12%20to%203.14-3776AB?logo=python&logoColor=white)
 ![AWS](https://img.shields.io/badge/AWS-Optional-FF9900?logo=amazonwebservices&logoColor=white)
 ![Presidio](https://img.shields.io/badge/Microsoft%20Presidio-Optional-5E5E5E)
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue)
@@ -18,11 +18,13 @@ The production runtime remains a single Python file: `orchestrator.py`. Policy, 
 
 [![Bedrock Guardrail Firewall local-first decision flow](docs/images/bedrock-local-first-decision.png)](docs/images/source/bedrock-local-first-decision.svg)
 
+> **Project status: maintained public release.** Version 4.1.1 is the current PyPI and GitHub release. The core can be evaluated entirely offline; optional Presidio and AWS controls have separate readiness checks and must not be represented as active unless the selected policy profile verifies them.
+
 For a walkthrough of the local privacy checks, optional Bedrock Guardrails call, and fail-closed boundaries, read the [AWS Builder Center article](https://builder.aws.com/content/3K0E850DN4AxRUwQMYgxGLwuPK0/put-local-privacy-checks-before-optional-bedrock-guardrails-calls).
 
 ## Try it offline in 60 seconds
 
-Prerequisites: Git and Python 3.10 or newer. These commands install the standard-library-only core, create no AWS client, and require no credentials.
+Prerequisites: Git and Python 3.12 or newer. These commands install the standard-library-only core, create no AWS client, and require no credentials.
 
 Windows PowerShell:
 
@@ -73,7 +75,7 @@ The real response also includes risk, triggered control categories, capability r
 - Tamper evidence. Local audit events form a SHA-256 hash chain with optional AWS KMS signatures.
 - Enterprise review routing. Optional Amazon SQS queues support tiered review workflows.
 - Immutable remote audit support. Optional Amazon S3 Object Lock and KMS encryption protect evidence.
-- Cross-platform operation. The core supports Windows and Linux with Python 3.10 through 3.14. The pinned Presidio stack supports Python 3.10 through 3.13.
+- Cross-platform operation. The core supports Windows and Linux with Python 3.12 through 3.14. The pinned Presidio stack supports Python 3.12 through 3.13.
 - Built-in validation. Doctor, policy validation, self-test, red-team, chaos, audit verification, and request-preview commands are included.
 
 ## Control flow
@@ -117,7 +119,7 @@ Install only what the deployment requires.
 .\.venv\Scripts\python.exe -m pip install -r requirements-presidio.txt
 ```
 
-The `aws` and `presidio` package extras install their Python libraries. Presidio is supported on Python 3.10 through 3.13. Its English model is intentionally kept in the pinned `requirements-presidio.txt` source-install path because [public package indexes should not accept direct URL dependencies](https://packaging.python.org/en/latest/specifications/version-specifiers/#direct-references) in published project metadata. The runtime never downloads a missing spaCy model. Run `doctor` after installation; readiness fails when the selected mode or profile requires Presidio and its model is unavailable.
+The `aws` and `presidio` package extras install their Python libraries. Presidio is supported on Python 3.12 through 3.13. Its English model is intentionally kept in the pinned `requirements-presidio.txt` source-install path because [public package indexes should not accept direct URL dependencies](https://packaging.python.org/en/latest/specifications/version-specifiers/#direct-references) in published project metadata. The runtime never downloads a missing spaCy model. Run `doctor` after installation; readiness fails when the selected mode or profile requires Presidio and its model is unavailable.
 
 The dependency groups are deliberately separated:
 
@@ -210,6 +212,11 @@ Read the [threat model](https://github.com/fusiontechstrategies/Bedrock-Guardrai
 - Gitleaks secret scanning
 
 See [Testing](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/blob/main/docs/TESTING.md) for the complete verification model.
+
+## Related Fusion projects
+
+- [M365 Incident Response Console](https://github.com/fusiontechstrategies/M365-Incident-Response-Console) applies the same evidence-first, explicit-authorization approach to Microsoft 365 investigations and containment.
+- Explore the complete [Fusion Technology Strategies public portfolio](https://github.com/fusiontechstrategies/FusionTechStrategies).
 
 ## Documentation
 

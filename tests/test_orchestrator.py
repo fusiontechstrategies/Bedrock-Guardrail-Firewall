@@ -1202,6 +1202,24 @@ class AwsIntegrationTests(GuardrailTestCase):
         self.assertIn("aws_input:skipped_local_decision", result["diagnostics"])
         self.assertIn("aws_output:skipped_prior_decision", result["diagnostics"])
 
+    def test_aggregate_local_risk_prevents_live_aws_data_transfer(self):
+        client = FakeBedrockClient()
+        system = self.make_live_system(client)
+        contexts = [
+            {"id": str(index), "text": f"Contact person{index}@example.com."}
+            for index in range(6)
+        ]
+
+        result = system.process(
+            "A locally safe request.",
+            {"retrieval_contexts": contexts},
+            record=False,
+        )
+
+        self.assertEqual(result["recommended_action"], "block")
+        self.assertEqual(client.calls, [])
+        self.assertIn("aws_input:skipped_local_decision", result["diagnostics"])
+
     def test_bedrock_input_block_prevents_output_call(self):
         response = {
             "action": "GUARDRAIL_INTERVENED",
