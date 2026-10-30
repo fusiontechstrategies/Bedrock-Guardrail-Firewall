@@ -18,6 +18,8 @@ The production runtime remains a single Python file: `orchestrator.py`. Policy, 
 
 [![Bedrock Guardrail Firewall local-first decision flow](docs/images/bedrock-local-first-decision.png)](docs/images/source/bedrock-local-first-decision.svg)
 
+> **Project status: maintained public release.** Version 4.1.1 is the current PyPI and GitHub release. The core can be evaluated entirely offline; optional Presidio and AWS controls have separate readiness checks and must not be represented as active unless the selected policy profile verifies them.
+
 For a walkthrough of the local privacy checks, optional Bedrock Guardrails call, and fail-closed boundaries, read the [AWS Builder Center article](https://builder.aws.com/content/3K0E850DN4AxRUwQMYgxGLwuPK0/put-local-privacy-checks-before-optional-bedrock-guardrails-calls).
 
 ## Try it offline in 60 seconds
@@ -210,6 +212,11 @@ Read the [threat model](https://github.com/fusiontechstrategies/Bedrock-Guardrai
 - Gitleaks secret scanning
 
 See [Testing](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/blob/main/docs/TESTING.md) for the complete verification model.
+
+## Related Fusion projects
+
+- [M365 Incident Response Console](https://github.com/fusiontechstrategies/M365-Incident-Response-Console) applies the same evidence-first, explicit-authorization approach to Microsoft 365 investigations and containment.
+- Explore the complete [Fusion Technology Strategies public portfolio](https://github.com/fusiontechstrategies/FusionTechStrategies).
 
 ## Documentation
 
