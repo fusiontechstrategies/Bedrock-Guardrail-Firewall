@@ -1,5 +1,9 @@
 # Bedrock Guardrail Firewall
 
+<p align="center">
+  <img src=".github/assets/social-preview.jpg" width="960" alt="Bedrock Guardrail Firewall: Redact. Defend. Verify.">
+</p>
+
 Turn every generative AI request and response into an enforceable security decision with PII redaction, prompt-injection defense, grounding checks, authorization controls, tamper-evident auditing, and optional Amazon Bedrock Guardrails.
 
 One file. Multiple control planes. Zero implicit cloud calls.
