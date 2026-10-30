@@ -3996,7 +3996,11 @@ class BedrockGuardrailAdapter:
             )
 
 
-def _can_invoke_external(detections: Sequence[Detection]) -> bool:
+def _can_invoke_external(
+    detections: Sequence[Detection], risk_level: RiskLevel | None = None
+) -> bool:
+    if risk_level in {RiskLevel.HIGH, RiskLevel.CRITICAL}:
+        return False
     current = (
         _max_action(*(item.action for item in detections))
         if detections
@@ -5345,8 +5349,9 @@ class BedrockGuardrailSystem:
                 )
             )
 
+        _, local_risk_level = self.risk.score(ctx.detections, behavior_score)
         skip_live_aws = self.config.aws_mode == "live" and not _can_invoke_external(
-            ctx.detections
+            ctx.detections, local_risk_level
         )
         aws_input_action = GuardrailAction.ALLOW
         if skip_live_aws:
@@ -5389,9 +5394,10 @@ class BedrockGuardrailSystem:
                 ctx.diagnostics.append("aws_input_output:rechecked")
 
         if ctx.sanitized_output:
+            _, pre_output_risk_level = self.risk.score(ctx.detections, behavior_score)
             if (
                 self.config.aws_mode == "live"
-                and not _can_invoke_external(ctx.detections)
+                and not _can_invoke_external(ctx.detections, pre_output_risk_level)
             ) or aws_input_action in {
                 GuardrailAction.REVIEW,
                 GuardrailAction.ESCALATE,
