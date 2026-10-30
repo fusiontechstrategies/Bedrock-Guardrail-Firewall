@@ -14,8 +14,8 @@ import json
 import os
 import re
 import stat
-import sys
 import tarfile
+import tomllib
 import unicodedata
 import zipfile
 import zlib
@@ -25,12 +25,6 @@ from pathlib import Path, PurePosixPath
 
 from packaging.markers import Marker
 from packaging.requirements import InvalidRequirement, Requirement
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
-
 
 _spec = importlib.util.spec_from_file_location(
     "trusted_archive_limits", Path(__file__).resolve().with_name("archive_limits.py")
@@ -211,7 +205,7 @@ def parse_metadata(value: bytes, source: str):
     require(one("Name") == PROJECT_NAME, f"Unexpected name in {source}")
     require(bool(one("Version")), f"Version is missing from {source}")
     require(
-        one("Requires-Python") == ">=3.10",
+        one("Requires-Python") == ">=3.12",
         f"Unexpected Python requirement in {source}",
     )
     require(

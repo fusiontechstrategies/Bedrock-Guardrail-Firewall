@@ -18,7 +18,7 @@ The published source history identifies a 4.0.0 baseline. Version 4.1.0 is publi
 | Built-in adversarial suite | 10 of 10 contained |
 | Deterministic mutation suite | 100 rounds completed |
 | Native Windows Python 3.12 | 216 passed, two optional integrations skipped in the current remediation run; dedicated integration jobs cover installed optional dependencies |
-| Windows and Linux Python 3.10 through 3.14 | Configured as a required CI matrix; the exact release commit must pass it before publication |
+| Windows and Linux Python 3.12 through 3.14 | Configured as a required CI matrix; the exact release commit must pass it before publication |
 | Missing Presidio model package check | Readiness failed before provider construction, download, socket creation, connection, or name resolution |
 | Package validation | Wheel and source distribution built; metadata, isolated install, library import, console entry point, packaged policies, default local state, missing-model failure, and full pinned Presidio initialization passed |
 | Release integrity | Repeat builds produced identical wheel and normalized source-distribution bytes; stable identity, archive safety, wheel RECORD, SPDX 2.3 dependency SBOM, SHA-256 evidence, and non-overwrite checks passed |
@@ -182,7 +182,7 @@ coverage report --show-missing
 GitHub Actions is configured to run:
 
 - Unit tests on Windows and Linux
-- Python 3.10, 3.11, 3.12, 3.13, and 3.14
+- Python 3.12, 3.13, and 3.14
 - Pinned AWS SDK contract validation
 - Pinned Presidio engine and redaction validation
 - Wheel and source-distribution build plus isolated installed-CLI and Presidio validation

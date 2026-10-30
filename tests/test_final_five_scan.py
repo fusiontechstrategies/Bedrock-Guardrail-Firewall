@@ -399,9 +399,6 @@ class UnicodeRegexTests(unittest.TestCase):
                 ):
                     app._validate_safe_pattern(pattern, "synthetic")
 
-    @unittest.skipIf(
-        sys.version_info < (3, 11), "Atomic syntax introduced in Python3.11"
-    )
     def test_atomic_group_cannot_hide_competing_repetitions(self):
         for pattern in (
             r"(?>a{0,256}a{0,256}a{0,256}a{0,256}X)",

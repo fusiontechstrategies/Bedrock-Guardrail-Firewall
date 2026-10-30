@@ -21,7 +21,7 @@ jobs:
     uses: fusiontechstrategies/FusionTechStrategies/.github/workflows/reusable-security.yml@f64c8eb98fa6c907e013d158089ea6ab38e91ad7
     with:
       semgrep_config: auto
-      # The package declares and tests Python 3.10 or newer, so the Python 3.7
+      # The package declares and tests Python 3.12 or newer, so the Python 3.7
       # compatibility rule is inapplicable to this repository.
       semgrep_exclude_rules: python.lang.compatibility.python37.python37-compatibility-importlib2
 
