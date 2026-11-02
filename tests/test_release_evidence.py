@@ -22,13 +22,13 @@ License-Expression: Apache-2.0
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
 Provides-Extra: aws
-Requires-Dist: boto3==1.43.82; extra == "aws"
-Requires-Dist: botocore==1.43.82; extra == "aws"
+Requires-Dist: boto3==1.43.122; extra == "aws"
+Requires-Dist: botocore==1.43.122; extra == "aws"
 Provides-Extra: presidio
 """
-    'Requires-Dist: presidio-analyzer==2.2.364; python_version < "3.14" '
+    'Requires-Dist: presidio-analyzer==2.2.366; python_version < "3.14" '
     'and extra == "presidio"\n'
-    'Requires-Dist: spacy==3.8.16; python_version < "3.14" '
+    'Requires-Dist: spacy==3.8.18; python_version < "3.14" '
     'and extra == "presidio"\n\n'
     "Synthetic package description.\n"
 ).encode()
@@ -124,7 +124,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
     def make_source(self, root: Path) -> None:
         (root / "scripts").mkdir()
         (root / "pyproject.toml").write_text(
-            '[build-system]\nrequires = ["setuptools==84.1.0", "wheel==0.48.0"]\n'
+            '[build-system]\nrequires = ["setuptools==84.2.1", "wheel==0.48.0"]\n'
             'build-backend = "setuptools.build_meta"\n'
             f'[project]\nname = "bedrock-guardrail-firewall"\nversion = "{VERSION}"\n'
             'readme = "README.md"\nlicense = "Apache-2.0"\nlicense-files = []\n'
@@ -133,9 +133,9 @@ class ReleaseEvidenceTests(unittest.TestCase):
             "bedrock-guardrail-firewall = "
             '"bedrock_guardrail_firewall.orchestrator:main"\n'
             "[project.optional-dependencies]\n"
-            'aws = ["boto3==1.43.82", "botocore==1.43.82"]\n'
-            "presidio = [\"presidio-analyzer==2.2.364; python_version < '3.14'\", "
-            "\"spacy==3.8.16; python_version < '3.14'\"]\n",
+            'aws = ["boto3==1.43.122", "botocore==1.43.122"]\n'
+            "presidio = [\"presidio-analyzer==2.2.366; python_version < '3.14'\", "
+            "\"spacy==3.8.18; python_version < '3.14'\"]\n",
             encoding="utf-8",
         )
         (root / "orchestrator.py").write_text(
@@ -158,10 +158,10 @@ class ReleaseEvidenceTests(unittest.TestCase):
             encoding="utf-8",
         )
         (root / "requirements-aws.txt").write_text(
-            "boto3==1.43.82\nbotocore==1.43.82\n", encoding="utf-8"
+            "boto3==1.43.122\nbotocore==1.43.122\n", encoding="utf-8"
         )
         (root / "requirements-presidio.txt").write_text(
-            "presidio-analyzer==2.2.364\nspacy==3.8.16\n"
+            "presidio-analyzer==2.2.366\nspacy==3.8.18\n"
             "https://example.invalid/"
             "en_core_web_sm-3.8.0-py3-none-any.whl#sha256=" + "a" * 64 + "\n",
             encoding="utf-8",
@@ -190,7 +190,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
         }
         wheel_files[f"{dist_info}/METADATA"] = METADATA
         wheel_files[f"{dist_info}/WHEEL"] = (
-            b"Wheel-Version: 1.0\nGenerator: setuptools (84.1.0)\n"
+            b"Wheel-Version: 1.0\nGenerator: setuptools (84.2.1)\n"
             b"Root-Is-Purelib: true\nTag: py3-none-any\n\n"
         )
         wheel_files[f"{dist_info}/top_level.txt"] = b"bedrock_guardrail_firewall\n"
@@ -285,7 +285,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             root = Path(directory)
             self.make_source(root)
             (root / "requirements-aws.txt").write_text(
-                "boto3>=1.43.82\n", encoding="utf-8"
+                "boto3>=1.43.122\n", encoding="utf-8"
             )
             with self.assertRaisesRegex(
                 release.ReleaseEvidenceError, "not an exact package pin"
@@ -297,7 +297,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             root = Path(directory)
             self.make_source(root)
             (root / "requirements-presidio.txt").write_text(
-                "presidio-analyzer==2.2.364\nspacy==3.8.16\n"
+                "presidio-analyzer==2.2.366\nspacy==3.8.18\n"
                 "https://example.invalid/"
                 "en_core_web_sm-3.8.0-py3-none-any.whl\n",
                 encoding="utf-8",
@@ -312,7 +312,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             root = Path(directory)
             self.make_source(root)
             (root / "requirements-presidio.txt").write_text(
-                "presidio-analyzer==2.2.364\nspacy==3.8.16\n"
+                "presidio-analyzer==2.2.366\nspacy==3.8.18\n"
                 "https://example.invalid/"
                 "en_core_web_sm-3.8.0-cp312-cp312-win_amd64.whl#sha256="
                 + "a" * 64
@@ -329,7 +329,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             root = Path(directory)
             self.make_source(root)
             (root / "requirements-aws.txt").write_text(
-                "boto3==1.43.81\nbotocore==1.43.82\n", encoding="utf-8"
+                "boto3==1.43.121\nbotocore==1.43.122\n", encoding="utf-8"
             )
             dist = root / "dist"
             self.make_distributions(dist)

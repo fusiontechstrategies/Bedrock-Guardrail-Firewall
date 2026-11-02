@@ -39,8 +39,8 @@ classifiers = [
 [project.optional-dependencies]
 aws = ["boto3==1.43.122", "botocore==1.43.122"]
 presidio = [
-  "presidio-analyzer==2.2.364; python_version < '3.14'",
-  "spacy==3.8.16; python_version < '3.14'",
+  "presidio-analyzer==2.2.366; python_version < '3.14'",
+  "spacy==3.8.18; python_version < '3.14'",
 ]
 
 [project.scripts]
