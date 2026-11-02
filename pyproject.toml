@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools==84.1.0", "wheel==0.48.0"]
+requires = ["setuptools==84.2.1", "wheel==0.48.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -37,7 +37,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-aws = ["boto3==1.43.118", "botocore==1.43.118"]
+aws = ["boto3==1.43.122", "botocore==1.43.122"]
 presidio = [
   "presidio-analyzer==2.2.364; python_version < '3.14'",
   "spacy==3.8.16; python_version < '3.14'",
