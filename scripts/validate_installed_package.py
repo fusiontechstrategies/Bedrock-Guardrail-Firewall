@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 PROJECT_NAME = "bedrock-guardrail-firewall"
 EXPECTED_VERSION = "4.1.1"
 EXPECTED_REQUIRES_DIST = {
-    'boto3==1.43.122; extra == "aws"',
-    'botocore==1.43.122; extra == "aws"',
+    'boto3==1.43.125; extra == "aws"',
+    'botocore==1.43.125; extra == "aws"',
     'presidio-analyzer==2.2.366; python_version < "3.14" and extra == "presidio"',
     'spacy==3.8.18; python_version < "3.14" and extra == "presidio"',
 }
