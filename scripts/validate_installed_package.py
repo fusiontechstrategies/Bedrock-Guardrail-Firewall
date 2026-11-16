@@ -46,9 +46,19 @@ def validate_metadata() -> None:
         set(document.get_all("Provides-Extra") or []) == {"aws", "presidio"},
         "Optional dependency groups changed",
     )
+    actual_plain_strings = {str(value) for value in actual_requirements}
     require(
         actual_requirements == EXPECTED_REQUIRES_DIST,
-        f"Requires-Dist mismatch: {sorted(actual_requirements)!r}",
+        "Requires-Dist mismatch: "
+        f"actual={sorted(actual_requirements)!r}; "
+        f"expected={sorted(EXPECTED_REQUIRES_DIST)!r}; "
+        f"missing={sorted(EXPECTED_REQUIRES_DIST - actual_requirements)!r}; "
+        f"unexpected={sorted(actual_requirements - EXPECTED_REQUIRES_DIST)!r}; "
+        f"actual_types={sorted(type(value).__module__ + '.' + type(value).__qualname__ for value in actual_requirements)!r}; "
+        f"plain_string_equal={actual_plain_strings == EXPECTED_REQUIRES_DIST}; "
+        f"actual_codepoints={[(str(value), [ord(char) for char in str(value)]) for value in sorted(actual_requirements, key=str)]!r}; "
+        f"expected_codepoints={[(value, [ord(char) for char in value]) for value in sorted(EXPECTED_REQUIRES_DIST)]!r}; "
+        f"validator={__file__}",
     )
 
 
