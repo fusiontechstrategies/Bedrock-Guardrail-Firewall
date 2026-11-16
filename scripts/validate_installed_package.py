@@ -16,8 +16,8 @@ EXPECTED_VERSION = "4.1.1"
 EXPECTED_REQUIRES_DIST = {
     'boto3==1.43.127; extra == "aws"',
     'botocore==1.43.127; extra == "aws"',
-    'presidio-analyzer==2.2.366; python_version &lt; "3.14" and extra == "presidio"',
-    'spacy==3.8.18; python_version &lt; "3.14" and extra == "presidio"',
+    'presidio-analyzer==2.2.366; python_version \u003c "3.14" and extra == "presidio"',
+    'spacy==3.8.18; python_version \u003c "3.14" and extra == "presidio"',
 }
 EXPECTED_RESOURCES = {
     "__init__.py",
@@ -46,19 +46,9 @@ def validate_metadata() -> None:
         set(document.get_all("Provides-Extra") or []) == {"aws", "presidio"},
         "Optional dependency groups changed",
     )
-    actual_plain_strings = {str(value) for value in actual_requirements}
     require(
         actual_requirements == EXPECTED_REQUIRES_DIST,
-        "Requires-Dist mismatch: "
-        f"actual={sorted(actual_requirements)!r}; "
-        f"expected={sorted(EXPECTED_REQUIRES_DIST)!r}; "
-        f"missing={sorted(EXPECTED_REQUIRES_DIST - actual_requirements)!r}; "
-        f"unexpected={sorted(actual_requirements - EXPECTED_REQUIRES_DIST)!r}; "
-        f"actual_types={sorted(type(value).__module__ + '.' + type(value).__qualname__ for value in actual_requirements)!r}; "
-        f"plain_string_equal={actual_plain_strings == EXPECTED_REQUIRES_DIST}; "
-        f"actual_codepoints={[(str(value), [ord(char) for char in str(value)]) for value in sorted(actual_requirements, key=str)]!r}; "
-        f"expected_codepoints={[(value, [ord(char) for char in value]) for value in sorted(EXPECTED_REQUIRES_DIST)]!r}; "
-        f"validator={__file__}",
+        f"Requires-Dist mismatch: {sorted(actual_requirements)!r}",
     )
 
 
