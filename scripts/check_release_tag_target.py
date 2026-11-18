@@ -13,6 +13,8 @@ from pathlib import Path
 REPOSITORY = "fusiontechstrategies/Bedrock-Guardrail-Firewall"
 WORKFLOW_REF = f"{REPOSITORY}/.github/workflows/release-tag.yml@refs/heads/main"
 WORKFLOWS = ("ci.yml", "codeql.yml", "security.yml")
+CREATION_FREEZE = 24389030
+IMMUTABLE_TAGS = 24384214
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -23,6 +25,55 @@ class ReleaseTagError(RuntimeError):
 def require(condition, message):
     if not condition:
         raise ReleaseTagError(message)
+
+
+def require_rule(rule, include, exclude, types, message):
+    require(
+        rule["target"] == "tag"
+        and rule["enforcement"] == "active"
+        and rule["conditions"]["ref_name"] == {"include": include, "exclude": exclude}
+        and sorted(entry["type"] for entry in rule["rules"]) == sorted(types),
+        message,
+    )
+
+
+def validate_tag_rules(prefix, tag, get):
+    ref = f"refs/tags/{tag}"
+    freeze = get(f"{prefix}/rulesets/{CREATION_FREEZE}")
+    immutable = get(f"{prefix}/rulesets/{IMMUTABLE_TAGS}")
+    require_rule(
+        freeze,
+        ["refs/tags/v*"],
+        [ref],
+        ["creation"],
+        "The blanket creation freeze must exclude only the approved literal tag",
+    )
+    require_rule(
+        immutable,
+        ["refs/tags/v*"],
+        [],
+        ["update", "deletion"],
+        "The permanent update and deletion lock must cover every release tag",
+    )
+    for rule in (freeze, immutable):
+        require(
+            not rule.get("bypass_actors"),
+            "Permanent tag rules must have no bypass actor",
+        )
+
+    all_rules = get(f"{prefix}/rulesets?includes_parents=true&per_page=100")
+    scoped = [
+        rule for rule in all_rules if rule["name"] == f"Bedrock authorized tag {tag}"
+    ]
+    require(len(scoped) == 1, "Expected exactly one literal-tag creation ruleset")
+    specific = get(f"{prefix}/rulesets/{scoped[0]['id']}")
+    require_rule(
+        specific,
+        [ref],
+        [],
+        ["creation"],
+        "The literal tag needs active creation protection",
+    )
 
 
 def validate_target(environment, version, get):
@@ -99,6 +150,7 @@ def validate_target(environment, version, get):
             f"{workflow} has not passed on the exact main commit",
         )
 
+    validate_tag_rules(prefix, tag, get)
     refs = get(f"{prefix}/git/matching-refs/tags/{tag}")
     require(
         not any(ref["ref"] == f"refs/tags/{tag}" for ref in refs),

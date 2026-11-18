@@ -56,6 +56,24 @@ class ReleaseTagTargetTests(unittest.TestCase):
                 "branch_policies": [{"name": "main", "type": "branch"}],
             },
         }
+        self.rule_names = f"{self.prefix}/rulesets?includes_parents=true&per_page=100"
+        self.freeze = f"{self.prefix}/rulesets/{gate.CREATION_FREEZE}"
+        self.immutable = f"{self.prefix}/rulesets/{gate.IMMUTABLE_TAGS}"
+        self.literal = f"{self.prefix}/rulesets/123"
+        self.responses[self.rule_names] = [
+            {"name": "Bedrock authorized tag v4.1.2", "id": 123}
+        ]
+        for path, include, exclude, rules in (
+            (self.freeze, "refs/tags/v*", ["refs/tags/v4.1.2"], ["creation"]),
+            (self.immutable, "refs/tags/v*", [], ["update", "deletion"]),
+            (self.literal, "refs/tags/v4.1.2", [], ["creation"]),
+        ):
+            self.responses[path] = {
+                "target": "tag",
+                "enforcement": "active",
+                "conditions": {"ref_name": {"include": [include], "exclude": exclude}},
+                "rules": [{"type": name} for name in rules],
+            }
         for workflow in gate.WORKFLOWS:
             self.responses[self.workflow_path(workflow)] = {
                 "workflow_runs": [
@@ -126,4 +144,27 @@ class ReleaseTagTargetTests(unittest.TestCase):
             "conclusion"
         ] = "failure"
         with self.assertRaisesRegex(gate.ReleaseTagError, "ci.yml"):
+            self.validate()
+
+    def test_missing_literal_creation_protection_is_refused(self):
+        self.responses[self.literal]["enforcement"] = "disabled"
+        with self.assertRaisesRegex(gate.ReleaseTagError, "active creation protection"):
+            self.validate()
+
+    def test_permanent_tag_lock_is_required(self):
+        self.responses[self.immutable]["conditions"]["ref_name"]["exclude"] = [
+            "refs/tags/v4.1.2"
+        ]
+        with self.assertRaisesRegex(
+            gate.ReleaseTagError, "lock must cover every release tag"
+        ):
+            self.validate()
+
+    def test_broader_creation_exception_is_refused(self):
+        self.responses[self.freeze]["conditions"]["ref_name"]["exclude"].append(
+            "refs/tags/v4.1.3"
+        )
+        with self.assertRaisesRegex(
+            gate.ReleaseTagError, "exclude only the approved literal tag"
+        ):
             self.validate()

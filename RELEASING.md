@@ -42,10 +42,10 @@ The protected-main reviewer, environment approver and repository settings admini
 
 Use a private, dedicated GitHub App installed only on this repository. Grant Contents write and the required Metadata read permission. The App needs no administration or workflow-edit permission. Store its client ID as `BEDROCK_TAG_APP_CLIENT_ID` and its key as `BEDROCK_TAG_APP_PRIVATE_KEY` in the separate `release-tag` environment. That environment must require the repository owner's approval, allow only the branch `main`, and disallow administrator overrides. Set its `BEDROCK_APPROVED_RELEASE_TAG` and `BEDROCK_APPROVED_RELEASE_COMMIT` variables to the exact reviewed values.
 
-1. After the verified merge and green main checks, create and read back an active **creation-only** ruleset for the literal `refs/tags/vX.Y.Z` that names this App alone. Keep the separate no-bypass update and deletion ruleset in force.
+1. After the verified merge and green main checks, create an active **creation-only** ruleset named `Bedrock authorized tag vX.Y.Z` for the literal `refs/tags/vX.Y.Z`. Read it back with an administrative credential and confirm that the dedicated App is the sole listed actor. GitHub omits bypass actors from ordinary ruleset reads. Check the no-bypass update and deletion ruleset with the same credential.
 2. Only after that exact rule is active, exclude the literal tag from the blanket creation freeze. Leave every other version covered by the blanket no-bypass rule.
 3. Dispatch `release-tag.yml` on `main` with the exact approved tag and commit. Review the read-only verification job, approve the `release-tag` job, and confirm the ref points to the approved commit. The workflow refuses to replace a ref.
-4. Restore the blanket rule to cover the literal tag again, verify both no-bypass rules, then remove the now-redundant exact-version rule. Remove the environment's one-release approval values and revoke the App key if it was issued for this release only.
+4. On success, failure, or cancellation, restore the blanket rule to cover the literal tag again. Read back both no-bypass rules before removing the exact-version creation rule. Remove the environment's one-release approval values and revoke the App key if it was issued for this release only.
 5. Dispatch the existing release candidate separately. The tag issuer does not attest, create a public release, or upload to PyPI.
 
 ## Post-publication verification
