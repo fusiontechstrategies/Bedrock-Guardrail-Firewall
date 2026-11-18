@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import http.client
+import importlib.util
 import json
 import os
 import re
@@ -16,6 +16,13 @@ WORKFLOWS = ("ci.yml", "codeql.yml", "security.yml")
 CREATION_FREEZE = 24389030
 IMMUTABLE_TAGS = 24384214
 ROOT = Path(__file__).resolve().parents[1]
+_spec = importlib.util.spec_from_file_location(
+    "trusted_release_integrity", Path(__file__).with_name("verify_release_integrity.py")
+)
+if _spec is None or _spec.loader is None:
+    raise ImportError("Trusted release integrity helper is unavailable")
+integrity = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(integrity)
 
 
 class ReleaseTagError(RuntimeError):
@@ -159,28 +166,16 @@ def validate_target(environment, version, get):
 
 
 def get_github_json(path):
-    limit = 1024 * 1024
-    connection = http.client.HTTPSConnection("api.github.com", timeout=15)
     try:
-        connection.request(
-            "GET",
-            f"/{path}",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-                "User-Agent": "bedrock-release-tag-verifier",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+        body = integrity.command(
+            ["gh", "api", "--hostname", "github.com", "--method", "GET", path]
         )
-        response = connection.getresponse()
-        require(response.status == 200, f"GitHub API returned HTTP {response.status}")
-        body = response.read(limit + 1)
-        require(
-            len(body) <= limit, "GitHub API response exceeded the validation budget"
-        )
-        return json.loads(body)
-    finally:
-        connection.close()
+    except Exception as error:
+        raise ReleaseTagError("A required GitHub API read failed") from error
+    require(
+        len(body) <= 1024 * 1024, "GitHub API response exceeded the validation budget"
+    )
+    return json.loads(body)
 
 
 def main():
@@ -194,7 +189,6 @@ def main():
         KeyError,
         ValueError,
         OSError,
-        http.client.HTTPException,
     ) as error:
         print(f"Release tag refused: {error}", file=sys.stderr)
         return 1
