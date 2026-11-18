@@ -117,12 +117,24 @@ jobs:
           --tag "$RELEASE_TAG"
           --commit "$RELEASE_COMMIT"
 
+      - name: Stage the five release files at the artifact root
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          mkdir release-assets
+          cp -- \
+            "dist/bedrock_guardrail_firewall-${version}-py3-none-any.whl" \
+            "dist/bedrock_guardrail_firewall-${version}.tar.gz" \
+            "release-evidence/bedrock-guardrail-firewall-${version}.spdx.json" \
+            release-evidence/release-evidence.json \
+            release-evidence/SHA256SUMS.txt \
+            release-assets/
+
       - name: Store the read-only release candidate
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-assets
-          path: |
-            dist/*
-            release-evidence/*
+          path: release-assets/*
           if-no-files-found: error
           retention-days: 14
