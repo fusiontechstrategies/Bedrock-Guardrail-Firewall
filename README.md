@@ -22,21 +22,15 @@ The production runtime remains a single Python file: `orchestrator.py`. Policy, 
 
 [![Bedrock Guardrail Firewall local-first decision flow](docs/images/bedrock-local-first-decision.png)](docs/images/source/bedrock-local-first-decision.svg)
 
-> **Project status: maintained public release.** Version 4.1.1 is the current PyPI and GitHub release. The core can be evaluated entirely offline; optional Presidio and AWS controls have separate readiness checks and must not be represented as active unless the selected policy profile verifies them.
-
-For a walkthrough of the local privacy checks, optional Bedrock Guardrails call, and fail-closed boundaries, read the [AWS Builder Center article](https://builder.aws.com/content/3K0E850DN4AxRUwQMYgxGLwuPK0/put-local-privacy-checks-before-optional-bedrock-guardrails-calls).
-
 ## Try it offline in 60 seconds
 
-Prerequisites: Git and Python 3.12 or newer. These commands install the standard-library-only core, create no AWS client, and require no credentials.
+Prerequisite: Python 3.12 or newer. These commands install the standard-library-only core, create no AWS client, and require no credentials.
 
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall.git
-Set-Location Bedrock-Guardrail-Firewall
 py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install .
+.\.venv\Scripts\python.exe -m pip install bedrock-guardrail-firewall==4.1.1
 .\.venv\Scripts\bedrock-guardrail-firewall.exe --presidio-mode disabled doctor
 .\.venv\Scripts\bedrock-guardrail-firewall.exe --presidio-mode disabled evaluate --input "Contact analyst@example.invalid for the approved report." --no-record
 ```
@@ -44,10 +38,8 @@ py -3 -m venv .venv
 Linux or macOS:
 
 ```bash
-git clone https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall.git
-cd Bedrock-Guardrail-Firewall
 python3 -m venv .venv
-.venv/bin/python -m pip install .
+.venv/bin/python -m pip install bedrock-guardrail-firewall==4.1.1
 .venv/bin/bedrock-guardrail-firewall --presidio-mode disabled doctor
 .venv/bin/bedrock-guardrail-firewall --presidio-mode disabled evaluate --input "Contact analyst@example.invalid for the approved report." --no-record
 ```
@@ -64,6 +56,22 @@ The evaluation returns a machine-readable decision and only releasable content:
 ```
 
 The real response also includes risk, triggered control categories, capability restrictions, diagnostics, and the active policy digest. It excludes blocked content, credentials, local paths, queue URLs, bucket names, and keys.
+
+Version 4.1.1 is the current PyPI and GitHub release. The core evaluates entirely offline. Optional Presidio and AWS controls have separate readiness checks and are never represented as active unless the selected policy profile verifies them.
+
+## Put it in a request path
+
+The [standard-library request gate](examples/stdlib_request_gate.py) converts firewall decisions into framework-neutral HTTP-style status and body pairs. It releases only allowed or irreversibly sanitized content, maps review, escalation, and block decisions to a contained response, and makes no cloud call in its runnable demonstration.
+
+```shell
+git clone https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall.git
+cd Bedrock-Guardrail-Firewall
+python examples/stdlib_request_gate.py
+```
+
+Use `gate_request` at the boundary before an application sends content to a model or returns candidate output to a caller. The request body accepts only `prompt` and `candidate_output`; identity, tenant, role, clearance, and authorization values must come from the host's authenticated server-side context through the separate `trusted_context` argument. Evidence recording is always enabled. The runnable demonstration writes only metadata evidence to a private temporary directory and removes that directory on exit. Regression tests cover sanitization, containment, malformed input, and attempted caller-supplied authorization context.
+
+For a walkthrough of the local privacy checks, optional Bedrock Guardrails call, and fail-closed boundaries, read the [AWS Builder Center article](https://builder.aws.com/content/3K0E850DN4AxRUwQMYgxGLwuPK0/put-local-privacy-checks-before-optional-bedrock-guardrails-calls).
 
 ## Why it is different
 
@@ -98,11 +106,19 @@ flowchart LR
 
 ## Reproducible sanitized demo
 
-Run the six synthetic fixtures after completing the quick start:
+The six-case fixture is a source-checkout walkthrough, independent of the package-only quick start above.
+
+Windows PowerShell:
 
 ```powershell
+git clone https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall.git
+Set-Location Bedrock-Guardrail-Firewall
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install .
 .\.venv\Scripts\python.exe examples\run_sanitized_demo.py
 ```
+
+On Linux or macOS, use `python3 -m venv .venv`, then run `.venv/bin/python -m pip install .` and `.venv/bin/python examples/run_sanitized_demo.py` from the cloned repository.
 
 The fixture uses disabled cloud integrations, emits no raw high-risk fixture values, and exits nonzero if a decision regresses. Its current deterministic baseline is:
 
@@ -116,11 +132,20 @@ The cases cover an ordinary request, redaction, a synthetic identifier, instruct
 
 ## Optional integrations
 
-Install only what the deployment requires.
+Install only what the deployment requires. A package installation can add the AWS integration without a source checkout:
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install ".[aws]"
-.\.venv\Scripts\python.exe -m pip install -r requirements-presidio.txt
+```shell
+python -m pip install "bedrock-guardrail-firewall[aws]==4.1.1"
+```
+
+For the complete pinned Presidio path, clone the repository into a separate source environment and use its reviewed requirements file:
+
+```shell
+git clone https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall.git
+cd Bedrock-Guardrail-Firewall
+python -m venv .venv
+python -m pip install -r requirements-presidio.txt
+python -m pip install .
 ```
 
 The `aws` and `presidio` package extras install their Python libraries. Presidio is supported on Python 3.12 through 3.13. Its English model is intentionally kept in the pinned `requirements-presidio.txt` source-install path because [public package indexes should not accept direct URL dependencies](https://packaging.python.org/en/latest/specifications/version-specifiers/#direct-references) in published project metadata. The runtime never downloads a missing spaCy model. Run `doctor` after installation; readiness fails when the selected mode or profile requires Presidio and its model is unavailable.
