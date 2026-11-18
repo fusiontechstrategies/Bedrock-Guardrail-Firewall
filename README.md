@@ -114,6 +114,7 @@ Windows PowerShell:
 git clone https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall.git
 Set-Location Bedrock-Guardrail-Firewall
 py -3 -m venv .venv
+$env:TMPDIR = $env:LOCALAPPDATA
 .\.venv\Scripts\python.exe -m pip install .
 .\.venv\Scripts\python.exe examples\run_sanitized_demo.py
 ```
