@@ -6,9 +6,16 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 
 ## [Unreleased]
 
+## [4.1.2] - 2026-11-18
+
+### Added
+
+- Added a credential-free application request-gate example with an explicit server-side authorization boundary.
+- Added an owner-reviewed release tag workflow that accepts only the approved signed protected-main commit and matching stable version.
+
 ### Changed
 
-- Refresh the paired boto3/botocore AWS integration pins to 1.43.118 and the development Ruff pin to 0.17.2.
+- Refresh the paired boto3/botocore AWS integration pins to 1.43.127 and the development Ruff pin to 0.17.5.
 
 ### Fixed
 
@@ -18,7 +25,7 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 
 ### Security
 
-- Refresh the reproducible build lock to certifi 2026.10.23 and setuptools 84.1.0, clearing the current build-tool advisories.
+- Refresh the reproducible build lock, including setuptools 84.2.1.
 - Require protected owner-only Windows final state namespaces and existing JSON leaves without silently repairing permissions. Create state temporaries, review/incident directories and evidence reservations through the pinned private descriptor helper before writing.
 - Preserve private POSIX state reads and writes below a retained root-owned sticky temporary ancestor; final directories and files still require private ownership and permissions.
 
@@ -141,7 +148,8 @@ The format follows Keep a Changelog, and versions follow semantic versioning.
 - Added public-response filtering for local and cloud resource details
 - Added blocked-content suppression and request-identifier pseudonymization in stored evidence
 
-[Unreleased]: https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/compare/v4.1.1...HEAD
+[Unreleased]: https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/compare/v4.1.2...HEAD
+[4.1.2]: https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/compare/v4.1.1...v4.1.2
 [4.1.1]: https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/compare/v4.1.0...v4.1.1
 [4.1.0]: https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/compare/e19e426522a4b9975cc9e37b8b9b68e91dd7344b...v4.1.0
 [4.0.0]: https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/commit/e19e426522a4b9975cc9e37b8b9b68e91dd7344b

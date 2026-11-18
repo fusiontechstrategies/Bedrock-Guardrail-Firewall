@@ -1,7 +1,7 @@
 # Bedrock Guardrail Firewall
 
 <p align="center">
-  <img src=".github/assets/social-preview.jpg" width="960" alt="Bedrock Guardrail Firewall: Redact. Defend. Verify.">
+  <img src="https://raw.githubusercontent.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/refs/heads/main/.github/assets/social-preview.jpg" width="960" alt="Bedrock Guardrail Firewall: Redact. Defend. Verify.">
 </p>
 
 Turn every generative AI request and response into an enforceable security decision with PII redaction, prompt-injection defense, grounding checks, authorization controls, tamper-evident auditing, and optional Amazon Bedrock Guardrails.
@@ -20,7 +20,7 @@ Bedrock Guardrail Firewall is a privacy-first enforcement layer for generative A
 
 The production runtime remains a single Python file: `orchestrator.py`. Policy, documentation, tests, and repository automation are kept separate so the runtime stays portable and auditable.
 
-[![Bedrock Guardrail Firewall local-first decision flow](docs/images/bedrock-local-first-decision.png)](docs/images/source/bedrock-local-first-decision.svg)
+[![Bedrock Guardrail Firewall local-first decision flow](https://raw.githubusercontent.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/refs/heads/main/docs/images/bedrock-local-first-decision.png)](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/blob/main/docs/images/source/bedrock-local-first-decision.svg)
 
 ## Try it offline in 60 seconds
 
@@ -30,7 +30,7 @@ Windows PowerShell:
 
 ```powershell
 py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install bedrock-guardrail-firewall==4.1.1
+.\.venv\Scripts\python.exe -m pip install bedrock-guardrail-firewall
 .\.venv\Scripts\bedrock-guardrail-firewall.exe --presidio-mode disabled doctor
 .\.venv\Scripts\bedrock-guardrail-firewall.exe --presidio-mode disabled evaluate --input "Contact analyst@example.invalid for the approved report." --no-record
 ```
@@ -39,7 +39,7 @@ Linux or macOS:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install bedrock-guardrail-firewall==4.1.1
+.venv/bin/python -m pip install bedrock-guardrail-firewall
 .venv/bin/bedrock-guardrail-firewall --presidio-mode disabled doctor
 .venv/bin/bedrock-guardrail-firewall --presidio-mode disabled evaluate --input "Contact analyst@example.invalid for the approved report." --no-record
 ```
@@ -57,11 +57,11 @@ The evaluation returns a machine-readable decision and only releasable content:
 
 The real response also includes risk, triggered control categories, capability restrictions, diagnostics, and the active policy digest. It excludes blocked content, credentials, local paths, queue URLs, bucket names, and keys.
 
-Version 4.1.1 is the current PyPI and GitHub release. The core evaluates entirely offline. Optional Presidio and AWS controls have separate readiness checks and are never represented as active unless the selected policy profile verifies them.
+Version 4.1.2 is the current release version of this source tree. The core evaluates entirely offline. Optional Presidio and AWS controls have separate readiness checks and are never represented as active unless the selected policy profile verifies them.
 
 ## Put it in a request path
 
-The [standard-library request gate](examples/stdlib_request_gate.py) converts firewall decisions into framework-neutral HTTP-style status and body pairs. It releases only allowed or irreversibly sanitized content, maps review, escalation, and block decisions to a contained response, and makes no cloud call in its runnable demonstration.
+The [standard-library request gate](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/blob/main/examples/stdlib_request_gate.py) converts firewall decisions into framework-neutral HTTP-style status and body pairs. It releases only allowed or irreversibly sanitized content, maps review, escalation, and block decisions to a contained response, and makes no cloud call in its runnable demonstration.
 
 ```shell
 git clone https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall.git
@@ -136,7 +136,7 @@ The cases cover an ordinary request, redaction, a synthetic identifier, instruct
 Install only what the deployment requires. A package installation can add the AWS integration without a source checkout:
 
 ```shell
-python -m pip install "bedrock-guardrail-firewall[aws]==4.1.1"
+python -m pip install "bedrock-guardrail-firewall[aws]"
 ```
 
 For the complete pinned Presidio path, clone the repository into a separate source environment and use its reviewed requirements file:
@@ -161,9 +161,9 @@ The dependency groups are deliberately separated:
 | `requirements-dev.txt` | Testing, linting, static analysis, and dependency auditing |
 | `requirements-build.txt` | Pinned distribution build and validation tools |
 
-Version 4.1.1 is published on [PyPI](https://pypi.org/project/bedrock-guardrail-firewall/4.1.1/) with a wheel, source distribution, and the `bedrock-guardrail-firewall` console command. Install this exact release with `python -m pip install bedrock-guardrail-firewall==4.1.1`. For a first offline check, run `bedrock-guardrail-firewall --presidio-mode disabled doctor`. The [GitHub release](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/releases/tag/v4.1.1) provides the matching SHA-256 checksums, SPDX 2.3 SBOM, and release evidence. Use the source installation above if you need an unpublished revision.
+Published distributions are listed in the [PyPI release history](https://pypi.org/project/bedrock-guardrail-firewall/#history). For a version-pinned installation, use `python -m pip install bedrock-guardrail-firewall==4.1.2` once that version is listed. For a first offline check, run `bedrock-guardrail-firewall --presidio-mode disabled doctor`. [GitHub releases](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/releases) provide the matching SHA-256 checksums, SPDX 2.3 SBOM, and release evidence.
 
-Release candidates use exact version, archive, metadata, SPDX 2.3 dependency SBOM, SHA-256, provenance, and trusted-publisher gates documented in [RELEASING.md](RELEASING.md). Manual candidate runs cannot publish. Publishing requires an approved GitHub release and approval through the protected `pypi` environment.
+Release candidates use exact version, archive, metadata, SPDX 2.3 dependency SBOM, SHA-256, provenance, and trusted-publisher gates documented in [RELEASING.md](https://github.com/fusiontechstrategies/Bedrock-Guardrail-Firewall/blob/main/RELEASING.md). Manual candidate runs cannot publish. Publishing requires an approved GitHub release and approval through the protected `pypi` environment.
 
 ## AWS safety modes
 

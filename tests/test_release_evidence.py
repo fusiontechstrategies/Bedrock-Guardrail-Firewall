@@ -11,7 +11,7 @@ from pathlib import Path
 
 from scripts import prepare_release_evidence as release
 
-VERSION = "4.1.1"
+VERSION = "4.1.2"
 TAG = f"v{VERSION}"
 COMMIT = "a" * 40
 METADATA = (
@@ -343,7 +343,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             root = Path(directory)
             self.make_source(root)
             with self.assertRaisesRegex(release.ReleaseEvidenceError, "does not match"):
-                release.validate_source_identity(root, "v4.1.2")
+                release.validate_source_identity(root, "v0.0.0")
 
     def test_archive_path_traversal_is_rejected(self):
         with self.assertRaisesRegex(release.ReleaseEvidenceError, "traverses"):

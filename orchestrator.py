@@ -38,7 +38,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 # Development version. Release preparation must set the approved release version.
-__version__ = "4.1.1"
+__version__ = "4.1.2"
 PRODUCT_NAME = "Bedrock Guardrail Firewall"
 POLICY_SCHEMA_VERSION = 2
 BASE_DIR = Path(__file__).resolve().parent

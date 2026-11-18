@@ -128,7 +128,7 @@ jobs:
             --disable-pip-version-check --only-binary=:all: --require-hashes \
             -r requirements-verifier.lock
           "$RUNNER_TEMP/release-verifier/bin/python" -I scripts/prepare_release_evidence.py \
-            --source-directory . --tag v4.1.1 --commit "$(git rev-parse HEAD)" \
+            --source-directory . --tag v4.1.2 --commit "$(git rev-parse HEAD)" \
             --dist-directory dist --output-directory ci-release-evidence
 
       - name: Test wheel from an isolated working directory
@@ -139,7 +139,7 @@ jobs:
           "${RUNNER_TEMP}/package-smoke/bin/python" -m pip install --disable-pip-version-check --no-deps "${WHEEL_PATH}"
           "${RUNNER_TEMP}/package-smoke/bin/python" -m pip check
           cd "${RUNNER_TEMP}"
-          test "$("${RUNNER_TEMP}/package-smoke/bin/bedrock-guardrail-firewall" --version)" = "bedrock-guardrail-firewall 4.1.1"
+          test "$("${RUNNER_TEMP}/package-smoke/bin/bedrock-guardrail-firewall" --version)" = "bedrock-guardrail-firewall 4.1.2"
           "${RUNNER_TEMP}/package-smoke/bin/python" "${GITHUB_WORKSPACE}/scripts/validate_installed_package.py" core
           "${RUNNER_TEMP}/package-smoke/bin/bedrock-guardrail-firewall" --presidio-mode disabled doctor
           test -f "${RUNNER_TEMP}/.guardrail-data/privacy.key"
@@ -180,7 +180,7 @@ jobs:
           archive = next(Path("dist").glob("*.tar.gz")).resolve()
           from scripts.normalize_sdist import normalize_sdist
           normalize_sdist(archive, 0)
-          validate_sdist(archive, "4.1.1", Path.cwd())
+          validate_sdist(archive, "4.1.2", Path.cwd())
           subprocess.run([sys.executable, "-m", "pip", "install", "--no-index", "--no-deps", "--no-build-isolation", str(archive)], check=True)
           root = Path.cwd()
           with tempfile.TemporaryDirectory() as folder:
