@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 PROJECT_NAME = "bedrock-guardrail-firewall"
-EXPECTED_VERSION = "4.1.1"
+EXPECTED_VERSION = "4.1.2"
 EXPECTED_REQUIRES_DIST = {
     'boto3==1.43.127; extra == "aws"',
     'botocore==1.43.127; extra == "aws"',

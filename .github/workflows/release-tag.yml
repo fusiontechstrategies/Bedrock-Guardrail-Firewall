@@ -1,0 +1,86 @@
+name: Create protected release tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable release tag authorized for creation
+        required: true
+        type: string
+      source_commit:
+        description: Exact signed protected-main commit authorized for release
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: protected-release-tag
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+  RELEASE_COMMIT: ${{ inputs.source_commit }}
+
+jobs:
+  verify:
+    if: github.repository == 'fusiontechstrategies/Bedrock-Guardrail-Firewall' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Verify the requested tag and commit
+        run: python -I scripts/check_release_tag_target.py
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  create:
+    needs: verify
+    if: github.repository == 'fusiontechstrategies/Bedrock-Guardrail-Firewall' && github.ref == 'refs/heads/main'
+    environment: release-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Recheck the approved tag, commit and release checks
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPROVED_TAG: ${{ vars.BEDROCK_APPROVED_RELEASE_TAG }}
+          APPROVED_COMMIT: ${{ vars.BEDROCK_APPROVED_RELEASE_COMMIT }}
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "$APPROVED_TAG"
+          test "$RELEASE_COMMIT" = "$APPROVED_COMMIT"
+          python -I scripts/check_release_tag_target.py
+      - name: Mint a repository-scoped tag issuer token
+        id: tag-app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.BEDROCK_TAG_APP_CLIENT_ID }}
+          private-key: ${{ secrets.BEDROCK_TAG_APP_PRIVATE_KEY }}
+          permission-contents: write
+      - name: Create the exact approved tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.tag-app.outputs.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$RELEASE_COMMIT"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            --raw-field "ref=refs/tags/$RELEASE_TAG" --raw-field "sha=$RELEASE_COMMIT" --silent
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha)" = "$RELEASE_COMMIT"
