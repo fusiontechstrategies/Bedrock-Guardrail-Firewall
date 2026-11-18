@@ -247,7 +247,6 @@ class TrustedPromotionTests(unittest.TestCase):
     def test_successful_draft_uploads_only_known_id_and_verifies_final_bytes(self):
         manifest = handoff.verify_handoff(self.assets, self.source, COMMIT)["manifest"]
         integrity = handoff.load_trusted_helper("verify_release_integrity")
-        integrity.verify_tag = lambda *args: None
 
         def response(arguments):
             if arguments[:2] == ["release", "download"]:
@@ -256,6 +255,11 @@ class TrustedPromotionTests(unittest.TestCase):
                     shutil.copyfile(path, destination / path.name)
                 return ""
             if arguments[1] == "repos/owner/repository/releases":
+                verify_tag.assert_called_once_with("owner/repository", TAG, COMMIT)
+                self.assertIn("tag_name=" + TAG, arguments)
+                self.assertFalse(
+                    any(arg.startswith("target_commitish=") for arg in arguments)
+                )
                 return json.dumps({"id": 901, "tag_name": TAG, "draft": True})
             if arguments[1] == "repos/owner/repository/releases/901":
                 return json.dumps(
@@ -271,6 +275,7 @@ class TrustedPromotionTests(unittest.TestCase):
 
         with (
             patch.object(draft, "load_integrity", return_value=integrity),
+            patch.object(integrity, "verify_tag") as verify_tag,
             patch.object(draft, "gh", side_effect=response) as gh,
         ):
             result = draft.create_draft(
@@ -282,6 +287,7 @@ class TrustedPromotionTests(unittest.TestCase):
                 manifest,
             )
         self.assertEqual(result, 901)
+        self.assertEqual(verify_tag.call_count, 2)
         uploads = [
             c.args[0]
             for c in gh.call_args_list

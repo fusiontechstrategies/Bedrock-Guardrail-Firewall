@@ -47,6 +47,8 @@ def create_draft(assets, notes, repository, tag, commit, manifest):
         raise ValueError("Release notes must be a bounded regular data file")
     release_id = None
     try:
+        # The verified tag already exists. Supplying its older commit as a tag
+        # creation target would make GitHub check for workflow-write permission.
         created = json.loads(
             gh(
                 [
@@ -56,8 +58,6 @@ def create_draft(assets, notes, repository, tag, commit, manifest):
                     "POST",
                     "-f",
                     "tag_name=" + tag,
-                    "-f",
-                    "target_commitish=" + commit,
                     "-f",
                     "name=Bedrock Guardrail Firewall " + tag,
                     "-F",
