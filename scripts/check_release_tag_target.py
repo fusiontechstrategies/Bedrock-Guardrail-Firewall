@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
-import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -159,13 +159,28 @@ def validate_target(environment, version, get):
 
 
 def get_github_json(path):
-    result = subprocess.run(
-        ["gh", "api", "--method", "GET", path],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return json.loads(result.stdout)
+    limit = 1024 * 1024
+    connection = http.client.HTTPSConnection("api.github.com", timeout=15)
+    try:
+        connection.request(
+            "GET",
+            f"/{path}",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                "User-Agent": "bedrock-release-tag-verifier",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        response = connection.getresponse()
+        require(response.status == 200, f"GitHub API returned HTTP {response.status}")
+        body = response.read(limit + 1)
+        require(
+            len(body) <= limit, "GitHub API response exceeded the validation budget"
+        )
+        return json.loads(body)
+    finally:
+        connection.close()
 
 
 def main():
@@ -178,7 +193,8 @@ def main():
         ReleaseTagError,
         KeyError,
         ValueError,
-        subprocess.CalledProcessError,
+        OSError,
+        http.client.HTTPException,
     ) as error:
         print(f"Release tag refused: {error}", file=sys.stderr)
         return 1
